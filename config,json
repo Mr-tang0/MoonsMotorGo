@@ -1,0 +1,28 @@
+[
+  {
+    "id": 0,
+    "name": "升降台Z轴",
+    "dir": 0,
+    "speed": 3000,
+    "resolution": 1000,
+    "position": 50,
+    "status": 0,
+    "unit": "mm",
+    "cwName": "上升",
+    "ccwName": "下降",
+    "description": "控制主载物台升降"
+  },
+  {
+    "id": 1,
+    "name": "水平X轴",
+    "dir": 0,
+    "speed": 5000,
+    "resolution": 2000,
+    "position": -12,
+    "status": 1,
+    "unit": "mm",
+    "cwName": "向左",
+    "ccwName": "向右",
+    "description": "控制水平平移"
+  }
+]
