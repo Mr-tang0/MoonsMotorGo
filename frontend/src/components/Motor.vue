@@ -12,27 +12,27 @@
       <div class="data-item">
         <span class="label">当前位置({{ motor.unit || 'mm'}})</span>
         <div class="value-wrapper">
-          <span class="value">{{ Number(motor.position || 0).toFixed(2) }}</span>
+          <span class="value">{{ Number(motor.position || 0).toFixed(4) }}</span>
         </div>
       </div>
     </div>
 
     <div class="control-grid">
       <div class="move-input-group">
-        <button class="dir-btn" @click="startMove('CW')">{{motor.cwName||'CW'}}</button>
+        <button class="dir-btn" @click="startMove('CCW')">{{motor.ccwName||'CCW'}}</button>
         <div class="input-wrapper">
           <input 
             type="number" 
             v-model="targetMoveLength" 
             step="0.01" 
-            @blur="targetMoveLength = Number(targetMoveLength).toFixed(2)" 
+            @blur="targetMoveLength = Number(targetMoveLength).toFixed(4)" 
           />
         </div>
-        <button class="dir-btn" @click="startMove('CCW')">{{motor.ccwName||'CCW'}}</button>
+        <button class="dir-btn" @click="startMove('CW')">{{motor.cwName||'CW'}}</button>
       </div>
 
       <div class="action-row">
-        <button class="btn btn-enable" @click="handleEnable">使能</button>
+        <button class="btn btn-enable" @click="handleEnable">{{ motor.enable ? '禁能' : '使能' }}</button>
         <button class="btn btn-stop" @click="handleStop">停止</button>
         <button class="btn btn-zero" @click="handleZero">归零</button>
       </div>
@@ -40,10 +40,12 @@
 
     <div class="status-monitor">
       <div class="monitor-grid">
+        <!-- <span class="badge" :class="{ 'warning': motor.positionError }">偏离</span> -->
         <span class="badge" :class="{ 'warning': motor.overheat }">过温</span>
-        <span class="badge" :class="{ 'error': motor.commError }">通讯</span>
-        <span class="badge" :class="{ 'info': motor.limitCW }">CW限位</span>
-        <span class="badge" :class="{ 'info': motor.limitCCW }">CCW限位</span>
+        <span class="badge" :class="{ 'warning': motor.commError }">通讯</span>
+        <span class="badge" :class="{ 'error': motor.limitCW }">正限</span>
+        <span class="badge" :class="{ 'error': motor.limitCCW }">反限</span>
+        <span class="badge" :class="{ 'error': motor.otherError }">其他</span>
       </div>
       <div class="footer-btns">
         <button class="text-btn">参数配置</button>
@@ -55,7 +57,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import { MotorEnable, MotorStop, MotorMoveRelative } from '../../wailsjs/go/main/App';
+import { MotorEnable, MotorStop, MotorMoveRelative,ResetPosition} from '../../wailsjs/go/main/App';
 
 interface Motor {
   id: number | string;// 设备ID
@@ -63,10 +65,16 @@ interface Motor {
   position?: number | string;// 当前位置
   enable?: boolean;// 是否使能
   unit?: string;// 位置单位
+
+  positionError?: boolean;// 位置错误
   overheat?: boolean;// 是否过温
   commError?: boolean;// 是否通讯错误
   limitCW?: boolean;// 是否CW限位
   limitCCW?: boolean;// 是否CCW限位
+  otherError?: boolean;// 其他错误
+  isMoving?: boolean; // 是否正在运动
+
+
   communicateType?: string; // 通讯方式modbus/Ascii
   cwName?: string;// CW名称
   ccwName?: string;// CCW名称
@@ -85,19 +93,74 @@ const confirmRemove = () => {
   }
 };
 
+
+
 // 前端接口
-const handleEnable = async() => {
-  const result = await MotorEnable(Number(props.motor.id),true);
-}
+const handleEnable = async () => {
+  const currentStatus = !!props.motor.enable; 
+  const targetStatus = !currentStatus;
+
+  try {
+    const result = await MotorEnable(Number(props.motor.id), targetStatus);
+    if (result.status === "success") {
+      console.log("操作成功");
+    } else {
+      alert("操作失败：" + (result.message || "请检查设备连接"));
+    }
+  } catch (error) {
+    console.error("通讯异常:", error);
+    alert("系统错误，请检查后端程序");
+  }
+};
+
 
 const handleStop = async() => {
+  try {
+    const result = await MotorStop(Number(props.motor.id));
+    if (result.status === "success") {
+      console.log("操作成功");
+    } else {
+      alert("操作失败：" + (result.message || "请检查设备连接"));
+    }
+  } catch (error) {
+    console.error("通讯异常:", error);
+    alert("系统错误，请检查后端程序");
+  }
 }
 
 const handleZero = async() => {
+  try {
+    const result = await ResetPosition(Number(props.motor.id));
+    if (result.status === "success") {
+      console.log("操作成功");
+    } else {
+      alert("操作失败：" + (result.message || "请检查设备连接"));
+    }
+  } catch (error) {
+    console.error("通讯异常:", error);
+  }
 
 }
 const startMove = async (dir: string) => {
 
+  var length = Number(targetMoveLength.value);
+  
+  if (dir === 'CCW') {
+    length = -length;
+  } 
+
+  try {
+    const result = await MotorMoveRelative(Number(props.motor.id), length);
+    if (result.status === "success") {
+      console.log("操作成功");
+    } else {
+      alert("操作失败：" + (result.message || "请检查设备连接"));
+    }
+  } catch (error) {
+    console.error("通讯异常:", error);
+    alert("系统错误，请检查后端程序");
+  }
+  
 }
 
 </script>

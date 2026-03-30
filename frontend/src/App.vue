@@ -20,7 +20,7 @@
             <span>波特率:</span>
             <select v-model="selectedBaud">
               <option value="9600">9600</option>
-              <option value="115200">115200</option>
+              <!-- <option value="115200">115200</option> -->
             </select>
           </div>
           <div class="button-group">
@@ -81,6 +81,8 @@
         </draggable>
       </div>
     </main>
+
+
   </div>
 </template>
 
@@ -91,7 +93,9 @@ import Motor from './components/motor.vue';
 import draggable from 'vuedraggable';
 
 
-import { EnumDevices, ConnectDevice, DisconnectDevice, LoadLocalMotors, SaveMotorsToLocal, SearchMotors } from '../wailsjs/go/main/App';
+import { EnumDevices, ConnectDevice, DisconnectDevice, 
+        ManualAddMotor,
+  LoadLocalMotors, SaveMotorsToLocal, SearchMotors } from '../wailsjs/go/main/App';
 
 interface MotorItem {
   id: number | string;// 设备ID
@@ -99,10 +103,15 @@ interface MotorItem {
   position?: number | string;// 当前位置
   enable?: boolean;// 是否使能
   unit?: string;// 位置单位
+
+  positionError?: boolean;// 位置错误
   overheat?: boolean;// 是否过温
   commError?: boolean;// 是否通讯错误
   limitCW?: boolean;// 是否CW限位
   limitCCW?: boolean;// 是否CCW限位
+  otherError ?: boolean;// 是否其他错误
+  isMoving ?: boolean; // 是否正在运动
+
   communicateType?: string; // 通讯方式modbus/Ascii
   cwName?: string;// CW名称
   ccwName?: string;// CCW名称
@@ -111,7 +120,7 @@ interface MotorItem {
 // 状态变量
 const portList = ref<string[]>([]);
 const selectedPort = ref('');
-const selectedBaud = ref('115200');
+const selectedBaud = ref('9600');
 const isConnected = ref(false);
 const searchQuery = ref('');
 const motors = ref<MotorItem[]>([]);
@@ -160,15 +169,47 @@ const searchMotors = async () => {
   await SearchMotors();
 };
 
+
+
 // 设备管理逻辑
-const addMotor = () => {
+const addMotor = async () => {
   motorIdCounter++;
-  motors.value.push({
+  const MotorConfig = {
     id: motorIdCounter,
-    name: `位移台 ${motorIdCounter}`,
-    enable: false
+    name: "新位移台",
+    unit: "mm",
+    description: "新位移台",
+    dir: 1,
+    speed: 1,
+    resolution: 20000,
+    cwName: "CW",
+    ccwName: "CCW",
+    mode: "modbus"
+  }
+  const result = await ManualAddMotor(MotorConfig);
+
+  motors.value.push({
+    id: MotorConfig.id,
+    name: MotorConfig.name,
+    position: 0,
+    enable: false,
+    unit: MotorConfig.unit,
+
+    positionError: false,
+    overheat: false,
+    commError: false,
+    limitCW: false,
+    limitCCW: false,
+    otherError: false,
+    isMoving: false,
+
+    communicateType: MotorConfig.mode,
+    cwName: MotorConfig.cwName,
+    ccwName: MotorConfig.ccwName
   });
+
 };
+
 
 // 移除逻辑
 const removeMotor = (index: number) => {
@@ -196,16 +237,46 @@ onMounted(async() => {
         position: motor.position,
         enable: motor.enable,
         unit: motor.unit,
+
+        positionError: motor.positionError,
         overheat: motor.overheat,
         commError: motor.commError,
         limitCW: motor.limitCW,
         limitCCW: motor.limitCCW,
+        otherError: motor.otherError,
+        isMoving: motor.isMoving,
+
         communicateType: motor.communicateType,
         cwName: motor.cwName,
         ccwName: motor.ccwName
 
       });
   })
+
+
+  // --- 新增：监听电机状态实时更新信号 ---
+  EventsOn("motor_status_update", (data: any) => {
+    // data 格式：{ id: number, position: number, error: { overheat: bool, ... } }
+    const motor = motors.value.find(m => m.id === data.id);
+    
+    if (motor) {
+      // 更新位置
+      motor.position = data.position;
+
+      // 更新错误状态（根据 Go 中 MotorError 结构体的字段名对应）
+      // 注意：Go 后端的 json tag 决定了这里的字段名
+      if (data.error) {
+        motor.positionError = data.error.positionError;
+        motor.overheat = data.error.overheat;
+        motor.commError = data.error.commError;
+        motor.limitCW = data.error.limitCW;
+        motor.limitCCW = data.error.limitCCW;
+        motor.otherError = data.error.otherError;
+        motor.isMoving = data.isMoving;
+        motor.enable = data.isEnabled; // 同步使能状态
+      }
+    }
+  });
 
   await LoadLocalMotors();
 });
@@ -397,7 +468,16 @@ onUnmounted(async() => {
   cursor: pointer;
 }
 
-.motor-viewport { flex: 1; padding: 40px; overflow-y: auto; }
+.motor-viewport {
+  height: 100%;       /* 或者你设定的具体高度 */
+  overflow-y: auto;   /* 允许纵向滚动 */
+  padding-right: 20px; /* 为滚动条和间隙预留宽度，数值可根据需求调整 */
+  padding-left: 20px;  /* 保持一定的左侧间距 */
+  padding-top: 20px;  /* 保持一定的左侧间距 */
+  box-sizing: border-box;
+}
+
+/* .motor-viewport { flex: 1; padding: 40px; overflow-y: auto; } */
 
 .motor-grid {
   display: grid;

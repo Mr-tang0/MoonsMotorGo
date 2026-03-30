@@ -22,6 +22,10 @@ export function LoadLocalMotors() {
   return window['go']['main']['App']['LoadLocalMotors']();
 }
 
+export function ManualAddMotor(arg1) {
+  return window['go']['main']['App']['ManualAddMotor'](arg1);
+}
+
 export function MotorEnable(arg1, arg2) {
   return window['go']['main']['App']['MotorEnable'](arg1, arg2);
 }
@@ -32,6 +36,10 @@ export function MotorMoveRelative(arg1, arg2) {
 
 export function MotorStop(arg1) {
   return window['go']['main']['App']['MotorStop'](arg1);
+}
+
+export function ResetPosition(arg1) {
+  return window['go']['main']['App']['ResetPosition'](arg1);
 }
 
 export function SaveMotorsToLocal() {
