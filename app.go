@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	update "MOONs/backend"
@@ -21,6 +23,9 @@ type App struct {
 	motors map[string]*backend.MoonsMotor
 
 	updater *update.UpdateService
+
+	cancelFunc    context.CancelFunc // 用于取消自动化任务的函数
+	isAutorunning bool               // 标记是否正在运行
 }
 
 // NewApp creates a new App application struct
@@ -610,4 +615,284 @@ func (a *App) APIUpdate() update.GitHubRelease {
 
 func (a *App) GetCachedRelease() update.GitHubRelease {
 	return a.updater.GetCachedRelease()
+}
+
+// StartAutomation 前端调用的接口
+func (a *App) StartAutomation(automationScript string) bool {
+	if automationScript == "" || a.isAutorunning {
+		return false
+	}
+
+	// 创建一个可以取消的 Context
+	var runCtx context.Context
+	runCtx, a.cancelFunc = context.WithCancel(context.Background())
+	a.isAutorunning = true
+
+	// 必须在独立的 goroutine 中运行，防止阻塞 Wails 主线程导致前端卡死
+	go func() {
+		defer func() {
+			a.isAutorunning = false
+		}()
+
+		fmt.Println("====== 自动化脚本开始执行 ======")
+		lines := preprocessScript(automationScript)
+
+		// 执行解释器
+		err := a.executeScript(runCtx, lines)
+		if err != nil {
+			fmt.Printf("脚本执行中断或出错: %v\n", err)
+		} else {
+			fmt.Println("====== 自动化脚本圆满完成 ======")
+		}
+	}()
+
+	return true
+}
+
+// StopAutomation 前端点击“停止”时调用的接口
+func (a *App) StopAutomation() {
+	if a.cancelFunc != nil {
+		a.cancelFunc() // 触发 Context 取消信号
+		fmt.Println("收到用户停止指令，正在终止自动化...")
+	}
+}
+
+// 预处理：按行切分，去空格，忽略空行
+func preprocessScript(script string) []string {
+	rawLines := strings.Split(script, "\n")
+	var lines []string
+	for _, line := range rawLines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "//") { // 支持 // 注释
+			lines = append(lines, trimmed)
+		}
+	}
+	return lines
+}
+
+// 核心解释器引擎
+func (a *App) executeScript(ctx context.Context, lines []string) error {
+	pc := 0 // Program Counter 程序计数器（当前执行到第几行）
+
+	for pc < len(lines) {
+		// 每次执行新一行前，先检查用户是否点击了“停止”
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		line := lines[pc]
+
+		// 1. 处理 FOR 循环
+		if strings.HasPrefix(strings.ToUpper(line), "FOR ") {
+			countStr := strings.TrimSpace(line[4:])
+			count, err := strconv.Atoi(countStr)
+			if err != nil {
+				runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行 FOR 循环次数解析失败: %s", pc+1, countStr))
+				return fmt.Errorf("第 %d 行 FOR 循环次数解析失败: %s", pc+1, countStr)
+			}
+
+			// 寻找对应的 END 建立循环体界限
+			endPc := findMatchingEnd(lines, pc)
+			if endPc == -1 {
+				runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行的 FOR 循环缺少对应的 END", pc+1))
+				return fmt.Errorf("第 %d 行的 FOR 循环缺少对应的 END", pc+1)
+			}
+
+			// 提取循环体内的子代码块
+			subLines := lines[pc+1 : endPc]
+
+			// 循环执行子代码块
+			for i := 0; i < count; i++ {
+				// 嵌套执行时也需要随时检查退出状态
+				if err := a.executeScript(ctx, subLines); err != nil {
+					return err
+				}
+			}
+
+			// 循环结束后，跳过整个 FOR-END 块
+			pc = endPc + 1
+			continue
+		}
+
+		// 2. 处理 DELAY 延时
+		if strings.HasPrefix(strings.ToUpper(line), "DELAY ") {
+			msStr := strings.TrimSpace(line[6:])
+			ms, err := strconv.Atoi(msStr)
+			if err != nil {
+				runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行 DELAY 时间解析失败: %s", pc+1, msStr))
+				return fmt.Errorf("第 %d 行 DELAY 时间解析失败: %s", pc+1, msStr)
+			}
+
+			// 使用 select 监听延时，这样如果中途点停止，能立刻唤醒退出，不用白等
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(ms) * time.Millisecond):
+			}
+
+			pc++
+			continue
+		}
+
+		// 3. 处理电机控制行 (例如 "1: CW 10" 或 "MOTOR1: CCW 5")
+		if strings.Contains(line, ":") {
+			parts := strings.SplitN(line, ":", 2)
+			motorID := strings.TrimSpace(parts[0])
+			cmdParts := strings.Fields(strings.TrimSpace(parts[1]))
+
+			if len(cmdParts) < 2 {
+				runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行电机指令格式错误: %s", pc+1, line))
+				return fmt.Errorf("第 %d 行电机指令格式错误: %s", pc+1, line)
+			}
+
+			action := strings.ToUpper(cmdParts[0]) // CW 或 CCW
+			valStr := cmdParts[1]
+			value, _ := strconv.ParseFloat(valStr, 64)
+
+			// 调用底层的通用硬件驱动控制函数
+			err := a.AutoMoveMotor(ctx, motorID, action, value)
+			if err != nil {
+				runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行执行电机动作失败: %v", pc+1, err))
+				return fmt.Errorf("执行电机动作失败: %v", err)
+			}
+
+			pc++
+			continue
+		}
+
+		runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行无法识别的指令行: %s", pc+1, line))
+		return fmt.Errorf("无法识别的指令行: %s", line)
+	}
+
+	return nil
+}
+
+// 辅助函数：寻找 FOR 匹配的 END 位置（支持多层 FOR 嵌套）
+func findMatchingEnd(lines []string, start int) int {
+	stack := 0
+	for i := start; i < len(lines); i++ {
+		upperLine := strings.ToUpper(lines[i])
+		if strings.HasPrefix(upperLine, "FOR ") {
+			stack++
+		} else if upperLine == "END" {
+			stack--
+			if stack == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// 模拟具体的电机物理控制函数
+func (a *App) AutoMoveMotor(ctx context.Context, motorID string, action string, value float64) error {
+	fmt.Printf("[硬件动作] 寻找到轴: %s -> 执行动作: %s -> 参数: %f\n", motorID, action, value)
+	var motor *backend.MoonsMotor
+	for key := range a.motors {
+		if a.motors[key].Config.Name == motorID {
+			motor = a.motors[key]
+			break
+		}
+	}
+	if motor == nil {
+		fmt.Println("未找到电机:", motorID)
+
+		return fmt.Errorf("未找到电机: %s", motorID)
+	}
+
+	switch action {
+	case "CW":
+		motor.MoveRelative(float32(value))
+		return nil
+	case "CCW":
+		motor.MoveRelative(-float32(value))
+		return nil
+	case "STOP":
+		motor.Stop()
+		return nil
+	case "VE":
+		motor.SetSpeed(float32(value))
+		return nil
+	case "EN":
+		if value == 1 {
+			motor.Enable(true)
+		} else {
+			motor.Enable(false)
+		}
+		return nil
+	default:
+		return fmt.Errorf("未知的动作: %s", action)
+	}
+}
+
+// ReadFile：调起系统选择框，选择 TXT 文件并读取
+func (a *App) ReadFile() (string, error) {
+	// 配置打开文件对话框的参数
+	selectedFile, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择自动化脚本文件",
+		Filters: []runtime.FileFilter{
+			{
+				DisplayName: "文本文件 (*.txt;*.json)",
+				Pattern:     "*.txt;*.json", // 过滤只显示 txt 和 json 格式
+			},
+			{
+				DisplayName: "所有文件 (*.*)",
+				Pattern:     "*.*",
+			},
+		},
+	})
+
+	// 如果用户点击了“取消”，selectedFile 会返回空字符串
+	if err != nil {
+		return "", fmt.Errorf("打开文件对话框失败: %v", err)
+	}
+	if selectedFile == "" {
+		return "", fmt.Errorf("用户取消了选择")
+	}
+
+	// 读取选择的文件内容
+	content, err := os.ReadFile(selectedFile)
+	if err != nil {
+		return "", fmt.Errorf("读取文件失败: %v", err)
+	}
+
+	return string(content), nil
+}
+
+// WriteFile：调起系统保存框，输入文件名后保存 content
+func (a *App) WriteFile(content string) error {
+	// 配置保存文件对话框的参数
+	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "导出自动化脚本",
+		DefaultFilename: "script.txt", // 默认填充的文件名
+		Filters: []runtime.FileFilter{
+			{
+				DisplayName: "文本文件 (*.txt)",
+				Pattern:     "*.txt",
+			},
+		},
+	})
+
+	// 如果用户点击了“取消”，savePath 会返回空字符串
+	if err != nil {
+		return fmt.Errorf("打开保存对话框失败: %v", err)
+	}
+	if savePath == "" {
+		return fmt.Errorf("用户取消了保存")
+	}
+
+	// 强制确保用户如果自己手改了后缀或者没写后缀时，依然是 .txt (可选，增强鲁棒性)
+	if filepath.Ext(savePath) == "" {
+		savePath += ".txt"
+	}
+
+	// 将内容写入到用户选择的绝对路径中
+	err = os.WriteFile(savePath, []byte(content), 0644)
+	if err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+
+	return nil
 }

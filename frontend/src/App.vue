@@ -4,7 +4,6 @@
       <div class="logo-area">
         <div class="logo-icon">PIMS</div>
         <h2>位移台控制软件</h2>
-        
       </div>
       
 
@@ -35,13 +34,30 @@
               {{ isConnected ? '断开连接' : '建立连接' }}
             </button>
             <button class="search-devices-btn" v-if="isConnected" @click="searchMotors">搜索设备</button>
+            <button class="automation-btn" v-if="isConnected" @click="toggleAutomation">{{ showAutomation ? '停止' : '开始' }}自动化程序</button>
           </div>
         </div>
       </div>
 
-      <!-- <h6>暂时只提供STF05-4XU适配，请勿连接其他位移台</h6>
+      <!-- 自动控制模块 -->
+      <div v-if="showAutomation&&isConnected" class="nav-section automation-section">
+        <label>自动控制</label>
+        <div class="glass-card automation-panel">
+          <textarea 
+            v-model="automationScript" 
+            class="script-input"
+            placeholder="输入自动化脚本...&#10;&#10;示例：&#10;M1: CW 10&#10;M2: CCW -5&#10;Delay 1000&#10;M1: CW -10"
+            rows="6"
+          ></textarea>
+          <div class="script-buttons">
+            <button class="btn-run" @click="runAutomation">{{automationProgress?'停止':'运行'}}</button>
+            <button class="btn-notify" @click="OpenScriptFile">打开脚本</button>
+            <button class="btn-notify" @click="SaveScriptFile">保存脚本</button>
+          </div>
+        </div>
+      </div>
 
-       -->
+      <!-- <h6>暂时只提供STF05-4XU适配，请勿连接其他位移台</h6> -->
 
       <div class="system-status">
         <div class="status-item">
@@ -159,7 +175,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, provide} from 'vue';
-import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime'
+import { EventsOn, EventsOff, BrowserOpenURL} from '../wailsjs/runtime/runtime'
 import Motor from './components/Motor.vue';
 import MotorSet from './components/MotorSet.vue';
 import draggable from 'vuedraggable';
@@ -175,7 +191,7 @@ provide('globalNotify', notify)
 
 import { EnumDevices, ConnectDevice, DisconnectDevice, 
         ManualAddMotor,DeleteMotor,
-  LoadLocalMotors, EditMotor, SearchMotors,APIUpdate, GetCachedRelease } from '../wailsjs/go/main/App';
+  LoadLocalMotors, EditMotor, SearchMotors,APIUpdate, StartAutomation, StopAutomation, ReadFile, WriteFile } from '../wailsjs/go/main/App';
 
 
 
@@ -208,6 +224,9 @@ const selectedPort = ref('');
 const selectedBaud = ref('9600');
 const isConnected = ref(false);
 const searchQuery = ref('');
+const showAutomation = ref(false);
+const automationProgress = ref(false);
+const automationScript = ref('');
 
 let motorIdCounter = 0;
 const motors = ref<MotorItem[]>([]);
@@ -298,12 +317,77 @@ const searchMotors = async () => {
   try {
     await SearchMotors();
   } finally {
-    // 搜索完成后稍作延迟关闭遮罩，提升体验
     setTimeout(() => {
       isSearching.value = false;
     }, 500);
   }
 };
+
+const toggleAutomation = () => {
+  showAutomation.value = !showAutomation.value;
+};
+
+const runAutomation = async () => {
+  if(!automationProgress.value){
+    if (!automationScript.value.trim()) {
+    notify("请输入自动化脚本", 'warning');
+    return;
+    }
+
+    try {
+      notify("自动化脚本开始执行", 'info');
+      automationProgress.value = true;
+      await StartAutomation(automationScript.value);
+    } catch (error) {
+      automationProgress.value=false;
+      notify("自动化脚本执行失败", 'error');
+      console.error("通讯异常:", error);
+    }
+  }else{
+    try {
+        await StopAutomation();
+        (automationProgress as any).value = false;
+        notify("自动化脚本已停止", 'info');
+      } catch (error) {
+        notify("自动化脚本停止失败", 'error');
+        console.error("通讯异常:", error);
+      }
+  }
+};
+
+const OpenScriptFile = async () => {
+  try {
+    const content = await ReadFile();
+    automationScript.value = content;
+    notify("脚本文件已打开", 'success');
+  } catch (error) {
+    notify("打开脚本文件失败", 'error');
+    console.error("打开文件错误:", error);
+  }
+}
+
+const SaveScriptFile = async () => {
+  if (!automationScript.value.trim()) {
+    notify("没有可保存的脚本内容", 'warning');
+    return;
+  }
+
+  try {
+    await WriteFile( automationScript.value);
+    notify("脚本文件已保存", 'success');
+  } catch (error) {
+    notify("保存脚本文件失败", 'error');
+    console.error("保存文件错误:", error);
+  }
+}
+
+// FOR 10
+// Z: CW 1
+// DELAY 1000
+// Z: CCW 1
+// DELAY 1000
+// END
+
 
 
 
@@ -427,6 +511,11 @@ onMounted(async() => {
       searchProgress.value = progress;
   });
 
+  EventsOn("auto_error", (error: any) => {
+      notify(error, 'error');
+      automationProgress.value = false;
+  });
+
   await LoadLocalMotors();
 
 
@@ -507,6 +596,19 @@ onUnmounted(async() => {
   font-weight: bold;
 }
 
+.nav-section {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 20px;
+}
+
+.nav-section.automation-section {
+  flex: 1;         /* 核心：撑满侧边栏剩余高度 */
+  min-height: 0;   /* 核心：允许子元素在空间不足时缩小，防止撑破布局 */
+  display: flex;
+  flex-direction: column;
+}
+
 .nav-section label {
   font-size: 11px;
   text-transform: uppercase;
@@ -522,6 +624,9 @@ onUnmounted(async() => {
   padding: 15px;
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255,255,255,0.1);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 .custom-select {
@@ -586,6 +691,78 @@ onUnmounted(async() => {
   cursor: pointer;
 }
 .search-devices-btn :hover { background: var(--primary-light); }
+
+.automation-btn {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: none;
+  background: #4caf50;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.automation-btn:hover { background: #45a049; }
+
+.automation-panel {
+  margin-top: 15px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;   /* 确保在小分辨率屏幕下也能正确计算剩余高度 */
+  height: auto;    /* 覆盖掉原有的固定 100%，让 flex 弹性决定 */
+}
+
+.script-input {
+  flex: 1;         /* 核心：让文本框吃满卡片内部的剩余高度 */
+  width: 100%;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 8px;
+  padding: 10px;
+  color: white;
+  font-family: 'Consolas', monospace;
+  font-size: 13px;
+  resize: none;
+  box-sizing: border-box;
+  overflow-y: auto; /* 当脚本行数很多时，内部出现滚动条 */
+}
+
+.script-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.script-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.btn-run {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  background: #2196f3;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-run:hover { background: #1976d2; }
+
+.btn-notify {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  background: #ff9800;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-notify:hover { background: #f57c00; }
 
 .system-status {
   margin-top: auto;

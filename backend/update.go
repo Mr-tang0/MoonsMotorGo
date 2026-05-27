@@ -32,8 +32,8 @@ type GitHubRelease struct {
 }
 
 func (u *UpdateService) GetUpdateInfo() (GitHubRelease, error) {
-	//根据app.json里的version与name、url获取更新信息
-	path := "backend/app.json"
+	//根据update.json里的version与name、url获取更新信息
+	path := "update.json"
 	//读取app.json文件
 	appJson, err := os.ReadFile(path)
 	if err != nil {
@@ -53,6 +53,7 @@ func (u *UpdateService) GetUpdateInfo() (GitHubRelease, error) {
 
 	// 发送HTTP请求获取最新发布信息
 	client := &http.Client{Timeout: 10 * time.Second}
+	fmt.Println("通过url获取最新发布信息:", appInfo.URL)
 	resp, err := client.Get(appInfo.URL)
 	if err != nil {
 		fmt.Printf("HTTP请求失败: %v\n", err)
