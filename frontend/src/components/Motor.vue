@@ -19,7 +19,7 @@
 
     <div class="control-grid">
       <div class="move-input-group">
-        <button class="dir-btn" @click="startMove('CCW')">{{motor.ccwName||'CCW'}}</button>
+        <button class="dir-btn" :disabled="!motor.enable" @click="startMove('CCW')">{{motor.ccwName||'CCW'}}</button>
         <div class="input-wrapper">
           <input 
             type="number" 
@@ -28,7 +28,7 @@
             @blur="targetMoveLength = Number(targetMoveLength).toFixed(4)" 
           />
         </div>
-        <button class="dir-btn" @click="startMove('CW')">{{motor.cwName||'CW'}}</button>
+        <button class="dir-btn" :disabled="!motor.enable" @click="startMove('CW')">{{motor.cwName||'CW'}}</button>
       </div>
 
       <div class="action-row">
@@ -48,7 +48,7 @@
         <span class="badge" :class="{ 'error': motor.otherError }">其他</span>
       </div>
       <div class="footer-btns">
-        <button class="text-btn">参数配置</button>
+        <button class="text-btn edit" @click="$emit('configure', motor)">参数配置</button>
         <button class="text-btn delete" @click="confirmRemove">移除设备</button>
       </div>
     </div>
@@ -56,39 +56,44 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, inject } from 'vue';
 import { MotorEnable, MotorStop, MotorMoveRelative,ResetPosition} from '../../wailsjs/go/main/App';
+
+
+const notify = inject('globalNotify');
 
 interface Motor {
   id: number | string;// 设备ID
   name?: string;// 设备名称
+  unit?: string;// 位置单位
+  speed?: number | string;// 速度
+  communicateType?: string; // 通讯方式modbus/Ascii
+  cwName?: string;// CW名称
+  ccwName?: string;// CCW名称
+  resolution?: number | string;// 分辨率
+  Description?: string;// 设备描述
+
   position?: number | string;// 当前位置
   enable?: boolean;// 是否使能
-  unit?: string;// 位置单位
-
-  positionError?: boolean;// 位置错误
+  mode?: boolean;// 位置错误
   overheat?: boolean;// 是否过温
   commError?: boolean;// 是否通讯错误
   limitCW?: boolean;// 是否CW限位
   limitCCW?: boolean;// 是否CCW限位
   otherError?: boolean;// 其他错误
   isMoving?: boolean; // 是否正在运动
-
-
-  communicateType?: string; // 通讯方式modbus/Ascii
-  cwName?: string;// CW名称
-  ccwName?: string;// CCW名称
 }
 
 const props = defineProps<{ motor: Motor }>();
-const emit = defineEmits(['remove', 'command']);
+const emit = defineEmits(['remove', 'command', 'configure']);
 
-const targetMoveLength = ref("1.00");
+const targetMoveLength = ref("1.0000");
 
 // 确认移除逻辑
 const confirmRemove = () => {
   const isConfirmed = window.confirm(`确定要移除设备 [${props.motor.name || props.motor.id}] 吗？\n此操作不可撤销。`);
   if (isConfirmed) {
+    // (notify as (msg: string, type: string) => void)("确认移除设备", 'info');
     emit('remove');
   }
 };
@@ -103,13 +108,13 @@ const handleEnable = async () => {
   try {
     const result = await MotorEnable(Number(props.motor.id), targetStatus);
     if (result.status === "success") {
-      console.log("操作成功");
+      (notify as (msg: string, type: string) => void)("轴(" + props.motor.name + (targetStatus ? ")使能成功" : ")禁能成功") , 'success');
     } else {
-      alert("操作失败：" + (result.message || "请检查设备连接"));
+      (notify as (msg: string, type: string) => void)("操作失败", 'error');
     }
   } catch (error) {
     console.error("通讯异常:", error);
-    alert("系统错误，请检查后端程序");
+    (notify as (msg: string, type: string) => void)("系统错误，请检查后端程序", 'error');
   }
 };
 
@@ -119,12 +124,13 @@ const handleStop = async() => {
     const result = await MotorStop(Number(props.motor.id));
     if (result.status === "success") {
       console.log("操作成功");
+      (notify as (msg: string, type: string) => void)("操作成功", 'success');
     } else {
-      alert("操作失败：" + (result.message || "请检查设备连接"));
+      (notify as (msg: string, type: string) => void)("操作失败", 'error');
     }
   } catch (error) {
     console.error("通讯异常:", error);
-    alert("系统错误，请检查后端程序");
+    (notify as (msg: string, type: string) => void)("通讯异常：" + error, 'error');
   }
 }
 
@@ -132,9 +138,9 @@ const handleZero = async() => {
   try {
     const result = await ResetPosition(Number(props.motor.id));
     if (result.status === "success") {
-      console.log("操作成功");
+      (notify as (msg: string, type: string) => void)("轴(" + props.motor.name + ")归零成功", 'success');
     } else {
-      alert("操作失败：" + (result.message || "请检查设备连接"));
+      (notify as (msg: string, type: string) => void)("轴(" + props.motor.name + ")归零失败", 'error');
     }
   } catch (error) {
     console.error("通讯异常:", error);
@@ -153,12 +159,13 @@ const startMove = async (dir: string) => {
     const result = await MotorMoveRelative(Number(props.motor.id), length);
     if (result.status === "success") {
       console.log("操作成功");
+
     } else {
-      alert("操作失败：" + (result.message || "请检查设备连接"));
+      (notify as (msg: string, type: string) => void)("操作失败", 'error');
     }
   } catch (error) {
     console.error("通讯异常:", error);
-    alert("系统错误，请检查后端程序");
+    (notify as (msg: string, type: string) => void)("系统错误，请检查后端程序", 'error');
   }
   
 }
@@ -286,6 +293,13 @@ const startMove = async (dir: string) => {
   box-shadow: 0 2px 4px rgba(0,0,0,0.05);
 }
 
+
+.dir-btn:disabled {
+  background-color: #ececec; /* 变灰 */
+  cursor: not-allowed;    /* 鼠标变成禁用图标 */
+  pointer-events: none;   /* 核心：彻底拦截鼠标点击事件 */
+}
+
 .input-wrapper { flex: 1; display: flex; align-items: center; }
 .input-wrapper input {
   width: 100%;
@@ -336,4 +350,5 @@ const startMove = async (dir: string) => {
 .footer-btns { display: flex; justify-content: space-between; }
 .text-btn { background: none; border: none; color: #adb5bd; font-size: 12px; cursor: pointer; font-weight: 600; }
 .text-btn.delete:hover { color: #fa5252; }
+.text-btn.edit:hover { color: #4c6ef5; }
 </style>

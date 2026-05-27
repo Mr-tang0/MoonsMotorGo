@@ -4,7 +4,9 @@
       <div class="logo-area">
         <div class="logo-icon">PIMS</div>
         <h2>位移台控制软件</h2>
+        
       </div>
+      
 
       <div class="nav-section">
         <label>通讯配置</label>
@@ -36,6 +38,10 @@
           </div>
         </div>
       </div>
+
+      <!-- <h6>暂时只提供STF05-4XU适配，请勿连接其他位移台</h6>
+
+       -->
 
       <div class="system-status">
         <div class="status-item">
@@ -71,6 +77,7 @@
               <Motor 
                 :motor="element"
                 @remove="removeMotor(index)"
+                @configure="openSettings"
               />
             </div>
           </template>
@@ -80,41 +87,119 @@
           </template>
         </draggable>
       </div>
+      
     </main>
 
 
   </div>
+
+  <div v-if="isSearching" class="search-overlay">
+    <div class="progress-container">
+      <h3>正在扫描设备...</h3>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" :style="{ width: searchProgress + '%' }"></div>
+      </div>
+      <p>{{ searchProgress }}% (正在检查地址 {{ Math.ceil(searchProgress * 0.32) }}/32)</p>
+    </div>
+  </div>
+
+  <MotorSet 
+      :visible="isModalVisible" 
+      :motorData="selectedMotor"
+      @close="isModalVisible = false"
+      @save="handleSaveConfig"
+      
+    />
+
+  <MessageContainer ref="msgBoxRef" />
+
+      <!-- 更新提示模态框 -->
+  <teleport to="body">
+      <transition name="modal">
+          <div v-if="showUpdateModal" class="modal-overlay" @click.self="showUpdateModal = false">
+              <div class="modal-container update-modal">
+                  <div class="modal-header">
+                      <h3 class="modal-title">发现新版本</h3>
+                      <button class="modal-close" @click="showUpdateModal = false">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <line x1="18" y1="6" x2="6" y2="18"/>
+                              <line x1="6" y1="6" x2="18" y2="18"/>
+                          </svg>
+                      </button>
+                  </div>
+                  <div class="modal-body">
+                      <div class="update-content">
+                          <div class="update-icon">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                  <path d="M3 3v5h5"/>
+                                  <path d="M3 16a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                                  <path d="M16 21h5v-5"/>
+                              </svg>
+                          </div>
+                          <div class="update-info">
+                              <p class="update-version">新版本: <strong>{{ updateInfo.tagName }}</strong></p>
+                              <p class="update-desc">发现应用程序更新，建议及时升级以获得更好的体验。</p>
+                          </div>
+                      </div>
+                  </div>
+                  <div class="modal-footer">
+                      <button class="btn btn-secondary" @click="showUpdateModal = false">
+                          稍后更新
+                      </button>
+                      <button class="btn btn-primary" @click="handleUpdate">
+                          立即更新
+                      </button>
+                  </div>
+              </div>
+          </div>
+      </transition>
+  </teleport>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, inject} from 'vue';
-import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime'
-import Motor from './components/motor.vue';
+import { ref, onMounted, onUnmounted, provide} from 'vue';
+import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime'
+import Motor from './components/Motor.vue';
+import MotorSet from './components/MotorSet.vue';
 import draggable from 'vuedraggable';
+import MessageContainer from './components/MessageContainer.vue';
+
+const msgBoxRef = ref(null)
+const notify = (content: string, type = 'info', duration = 3000) => {
+  (msgBoxRef.value as any)?.addMessage(content, type, duration)
+}
+
+provide('globalNotify', notify)
 
 
 import { EnumDevices, ConnectDevice, DisconnectDevice, 
-        ManualAddMotor,
-  LoadLocalMotors, SaveMotorsToLocal, SearchMotors } from '../wailsjs/go/main/App';
+        ManualAddMotor,DeleteMotor,
+  LoadLocalMotors, EditMotor, SearchMotors,APIUpdate, GetCachedRelease } from '../wailsjs/go/main/App';
+
+
+
 
 interface MotorItem {
   id: number | string;// 设备ID
   name?: string;// 设备名称
+  unit?: string;// 位置单位
+  speed?: number | string;// 速度
+  mode?: string; // 通讯方式modbus/Ascii
+  cwName?: string;// CW名称
+  ccwName?: string;// CCW名称
+  resolution?: number | string;// 分辨率
+  description?: string;// 设备描述
+
   position?: number | string;// 当前位置
   enable?: boolean;// 是否使能
-  unit?: string;// 位置单位
-
   positionError?: boolean;// 位置错误
   overheat?: boolean;// 是否过温
   commError?: boolean;// 是否通讯错误
   limitCW?: boolean;// 是否CW限位
   limitCCW?: boolean;// 是否CCW限位
-  otherError ?: boolean;// 是否其他错误
-  isMoving ?: boolean; // 是否正在运动
-
-  communicateType?: string; // 通讯方式modbus/Ascii
-  cwName?: string;// CW名称
-  ccwName?: string;// CCW名称
+  otherError?: boolean;// 其他错误
+  isMoving?: boolean; // 是否正在运动
 }
 
 // 状态变量
@@ -123,9 +208,45 @@ const selectedPort = ref('');
 const selectedBaud = ref('9600');
 const isConnected = ref(false);
 const searchQuery = ref('');
-const motors = ref<MotorItem[]>([]);
 
 let motorIdCounter = 0;
+const motors = ref<MotorItem[]>([]);
+const isModalVisible = ref(false);
+const selectedMotor = ref<any>(null);
+
+  
+const openSettings = (motor: any) => {
+  // 使用浅拷贝，防止在模态框未保存时就影响主列表显示
+  selectedMotor.value = { ...motor };
+  isModalVisible.value = true;
+};
+
+const handleSaveConfig = async (updatedData: any) => {
+  //根据id找到电机索引
+  const index = motors.value.findIndex(m => m.id === updatedData.id);
+  if (index !== -1) {
+    try {
+      const APIResponse = await EditMotor(updatedData.id, updatedData);
+      if (APIResponse.status === "success") {
+        // 更新成功，刷新主列表
+        const updatedMotor = { ...motors.value[index], ...updatedData };
+        if (updatedData.newID !== undefined && updatedData.newID !== updatedData.id) {
+          updatedMotor.id = updatedData.newID;
+        }
+        motors.value[index] = updatedMotor;
+        notify("轴(" + updatedMotor.name + ")配置已更新并保存", 'success');
+      }else {
+        notify("保存配置失败：" + (APIResponse.message || "请检查设备连接"), 'error');
+      }
+    } catch (err) {
+      notify("保存配置失败：" + err, 'error');
+    }
+  }
+
+  isModalVisible.value = false;
+};
+
+
 
 // 1. 刷新串口逻辑
 const refreshPorts = async () => {
@@ -136,7 +257,7 @@ const refreshPorts = async () => {
       selectedPort.value = portList.value[0];
     }
   } catch (err) {
-    console.error("刷新串口失败:", err);
+    notify("刷新串口失败: " + err, 'error');
   }
 };
 
@@ -147,7 +268,7 @@ const toggleConnection = async () => {
     isConnected.value = false;
   } else {
     if (!selectedPort.value) {
-      alert("请先选择一个串口");
+      notify("请先选择一个串口", 'error');
       return;
     }
     try {
@@ -156,76 +277,80 @@ const toggleConnection = async () => {
         isConnected.value = true;
       }
     } catch (err) {
-      alert("连接失败: " + err);
+      notify("连接失败: " + err, 'error');
     }
   }
 };
 
+
+const isSearching = ref(false);
+const searchProgress = ref(0);
+
 const searchMotors = async () => { 
   if (!isConnected.value) {
-    alert("请先建立连接");
+    notify("请先建立连接", 'error');
+
     return;
   }
-  await SearchMotors();
+  isSearching.value = true;
+  searchProgress.value = 0;
+  
+  try {
+    await SearchMotors();
+  } finally {
+    // 搜索完成后稍作延迟关闭遮罩，提升体验
+    setTimeout(() => {
+      isSearching.value = false;
+    }, 500);
+  }
 };
+
 
 
 
 // 设备管理逻辑
 const addMotor = async () => {
-  motorIdCounter++;
-  const MotorConfig = {
-    id: motorIdCounter,
-    name: "新位移台",
-    unit: "mm",
-    description: "新位移台",
-    dir: 1,
-    speed: 1,
-    resolution: 20000,
-    cwName: "CW",
-    ccwName: "CCW",
-    mode: "modbus"
+  const result = await ManualAddMotor();
+  if (result.status === "success") {
+    notify("轴(新位移台)添加成功", 'success');
+  }else {
+    notify("轴(新位移台)添加失败：" + (result.message || "请检查设备连接"), 'error');
   }
-  const result = await ManualAddMotor(MotorConfig);
-
-  motors.value.push({
-    id: MotorConfig.id,
-    name: MotorConfig.name,
-    position: 0,
-    enable: false,
-    unit: MotorConfig.unit,
-
-    positionError: false,
-    overheat: false,
-    commError: false,
-    limitCW: false,
-    limitCCW: false,
-    otherError: false,
-    isMoving: false,
-
-    communicateType: MotorConfig.mode,
-    cwName: MotorConfig.cwName,
-    ccwName: MotorConfig.ccwName
-  });
-
 };
 
 
 // 移除逻辑
-const removeMotor = (index: number) => {
+const removeMotor = async (index: number) => {
+  await DeleteMotor(Number(motors.value[index].id));
   motors.value.splice(index, 1);
+  notify("轴(" + motors.value[index].name + ")已移除", 'success');
 };
 
 // 搜索逻辑
 const handleSearch = () => {
   console.log("执行搜索:", searchQuery.value);
-
 };
 
 
+const updateInfo = ref({
+  tagName: '无',
+  htmlUrl: 'https://github.com'
+})
+// 更新模态框状态
+const showUpdateModal = ref(false);
+
+// 更新处理函数
+const handleUpdate = () => {
+    if (updateInfo.value.htmlUrl) {
+        // window.open(updateInfo.value.htmlUrl, '_blank');
+        BrowserOpenURL(updateInfo.value.htmlUrl) 
+        showUpdateModal.value = false;
+    }
+};
 
 // 初始化
 onMounted(async() => {
+
   refreshPorts(); // 初始化自动刷新一次串口
   
   EventsOn("find_motor", (motor) => {
@@ -234,22 +359,24 @@ onMounted(async() => {
       motors.value.push({
         id: motor.id,
         name: motor.name,
-        position: motor.position,
-        enable: motor.enable,
         unit: motor.unit,
-
-        positionError: motor.positionError,
-        overheat: motor.overheat,
-        commError: motor.commError,
-        limitCW: motor.limitCW,
-        limitCCW: motor.limitCCW,
-        otherError: motor.otherError,
-        isMoving: motor.isMoving,
-
-        communicateType: motor.communicateType,
+        description: motor.description,
+        speed: motor.speed,
+        resolution: motor.resolution,
         cwName: motor.cwName,
-        ccwName: motor.ccwName
+        ccwName: motor.ccwName,
+        mode: motor.mode,
 
+
+        // position: motor.position,
+        // enable: motor.enable,
+        // positionError: motor.positionError,
+        // overheat: motor.overheat,
+        // commError: motor.commError,
+        // limitCW: motor.limitCW,
+        // limitCCW: motor.limitCCW,
+        // otherError: motor.otherError,
+        // isMoving: motor.isMoving,
       });
   })
 
@@ -276,19 +403,62 @@ onMounted(async() => {
         motor.enable = data.isEnabled; // 同步使能状态
       }
     }
+
+  });
+
+  EventsOn("edit_ID", (data: any) => {
+    // alert(`电机 ID 已从 ${data.oldID} 修改为 ${data.newID}`);
+    
+     // 1. 在当前列表中找到旧 ID 的电机
+    const motor = motors.value.find(m => m.id === data.oldID);
+    if (motor) {
+      // 2. 更新响应式对象的 ID 属性
+      motor.id = data.newID;
+      
+      // 3. 如果内部存了 newID 备份，重置它防止再次触发
+      if ('newID' in motor) {
+        (motor as any).newID = 0;
+      }
+      notify("轴(" + motor.name + ")ID已更新", 'success');
+    }
+  });
+
+  EventsOn("search_progress", (progress: number) => {
+      searchProgress.value = progress;
   });
 
   await LoadLocalMotors();
+
+
+  const release = await APIUpdate()
+  try {
+    if (release) {
+      updateInfo.value.tagName = release.tag_name
+      updateInfo.value.htmlUrl = release.html_url
+      if (release.assets.length > 0) {
+          updateInfo.value.htmlUrl = release.assets[0].browser_download_url
+      }
+      // 显示更新模态框
+      showUpdateModal.value = true
+    }
+  } catch (error) {
+    console.log(error)
+  }
+
+
 });
 
 onUnmounted(async() => {
   // 离开页面时，断开连接
   if (isConnected.value) {
     DisconnectDevice();
+    notify("已断开连接", 'success');
   }
   EventsOff("find_motor");
-  // await SaveMotorsToLocal();
 });
+
+
+
 
 </script>
 
@@ -505,5 +675,239 @@ onUnmounted(async() => {
   border-color: var(--primary);
   color: var(--primary);
   background: rgba(54, 156, 233, 0.05);
+}
+.search-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999; /* 确保在最上层 */
+  color: white;
+}
+
+.progress-container {
+  width: 400px;
+  text-align: center;
+}
+
+.progress-bar-bg {
+  width: 100%;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  margin: 20px 0;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  box-shadow: 0 0 15px var(--primary);
+  transition: width 0.2s ease;
+}
+
+
+
+
+
+
+/* 更新模态框样式 */
+/* 遮罩层 */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(4px);
+}
+
+/* 模态框容器 */
+.modal-container {
+    background: linear-gradient(180deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.98) 100%);
+    border-radius: 16px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(148, 163, 184, 0.1);
+    overflow: hidden;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+}
+
+.modal-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: #cbd5e1;
+}
+
+.modal-close {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 8px;
+    transition: all 0.2s;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-close:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #f1f5f9;
+}
+
+.modal-close svg {
+    width: 18px;
+    height: 18px;
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+.modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 16px 20px;
+}
+
+.btn {
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 1) 0%, rgba(59, 130, 246, 1) 100%);
+    color: white;
+}
+
+.btn-primary:hover {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.9) 0%, rgba(59, 130, 246, 0.9) 100%);
+    transform: translateY(-1px);
+}
+
+.btn-secondary {
+    background: rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+}
+
+.btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+/* 更新模态框内容 */
+.update-modal {
+    width: 420px;
+    max-width: 90vw;
+}
+
+.update-modal .modal-header {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.1) 0%, rgba(59, 130, 246, 0.1) 100%);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.update-modal .modal-title {
+    color: #f1f5f9;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.update-content {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 10px 0;
+}
+
+.update-icon {
+    width: 64px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.2) 0%, rgba(59, 130, 246, 0.2) 100%);
+    border-radius: 16px;
+    color: #38bdf8;
+    flex-shrink: 0;
+}
+
+.update-icon svg {
+    width: 32px;
+    height: 32px;
+}
+
+.update-info {
+    flex: 1;
+}
+
+.update-version {
+    font-size: 15px;
+    color: #f1f5f9;
+    margin: 0 0 8px 0;
+    font-weight: 500;
+}
+
+.update-version strong {
+    color: #38bdf8;
+}
+
+.update-desc {
+    font-size: 13px;
+    color: #94a3b8;
+    margin: 0;
+    line-height: 1.5;
+}
+
+.update-modal .modal-footer {
+    border-top: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+/* 模态框动画 */
+.modal-enter-active,
+.modal-leave-active {
+    transition: opacity 0.3s ease;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+    opacity: 0;
+}
+
+.modal-enter-active .modal-container,
+.modal-leave-active .modal-container {
+    transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.modal-enter-from .modal-container,
+.modal-leave-to .modal-container {
+    transform: scale(0.95);
+    opacity: 0;
 }
 </style>

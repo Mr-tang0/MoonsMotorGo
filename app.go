@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	update "MOONs/backend"
+
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -17,6 +19,8 @@ type App struct {
 	ctx    context.Context
 	comm   backend.SerialCommunicator
 	motors map[string]*backend.MoonsMotor
+
+	updater *update.UpdateService
 }
 
 // NewApp creates a new App application struct
@@ -28,11 +32,14 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	// 初始化更新服务
+	a.updater = &update.UpdateService{}
+
 	a.comm = backend.SerialCommunicator{
 		Port:       "COM0",
 		BaudRate:   9600,
 		Timeout:    100 * time.Millisecond,
-		MaxRetries: 2,
+		MaxRetries: 1,
 	}
 
 	// 启动后台监控协程
@@ -72,10 +79,6 @@ func (a *App) monitorLoop() {
 			isFullScanCycle := (cycleCounter >= 10)
 
 			for _, motor := range a.motors {
-				//如果电机没有使能，直接略过
-				if !motor.Enabled {
-					continue
-				}
 
 				motorID := motor.Config.ID
 
@@ -84,30 +87,50 @@ func (a *App) monitorLoop() {
 				shouldRead := isFullScanCycle || activeTracking[motorID]
 
 				if shouldRead {
-					// 1. 读取位置
-					_, errPos := motor.GetPosition()
+					//如果电机没有使能，直接略过
+					if motor.Enabled {
+						// 1. 读取位置
+						_, errPos := motor.GetPosition()
 
-					// 2. 读取错误状态
-					errErr := motor.GetError()
+						if errPos != nil {
+							// 认为电机下线了，将电机状态置为disable,下一次不在读取，同时通知前端：发送下线信号
+							fmt.Printf("电机 %d 获取位置失败: %v\n", motorID, errPos)
+							motor.Enabled = false
+						}
 
-					// 3. 读取运动状态（判断是否继续高频追踪的关键）
-					isMoving, errStat := motor.GetMotionStatus()
+						// 2. 读取错误状态
+						errErr := motor.GetError()
 
-					// 更新追踪状态：如果正在运动，下个 100ms 继续读；如果不运动了，回归全局频率
-					if errStat == nil {
-						activeTracking[motorID] = isMoving
-					}
+						// 3. 读取运动状态（判断是否继续高频追踪的关键）
+						isMoving, errStat := motor.GetMotionStatus()
 
-					// 4. 数据推送给前端
-					if errPos == nil && errErr == nil {
+						// 更新追踪状态：如果正在运动，下个 100ms 继续读；如果不运动了，回归全局频率
+						if errStat == nil {
+							activeTracking[motorID] = isMoving
+						}
+
+						// 4. 数据推送给前端
+						if errPos == nil && errErr == nil {
+							runtime.EventsEmit(a.ctx, "motor_status_update", map[string]interface{}{
+								"id":        motorID,
+								"position":  motor.Position - motor.Zero,
+								"error":     motor.Error,
+								"isMoving":  isMoving, // 告知前端是否正在运动，方便 UI 展示
+								"isEnabled": motor.Enabled,
+							})
+						}
+					} else {
+						// 如果电机未使能，或下线
 						runtime.EventsEmit(a.ctx, "motor_status_update", map[string]interface{}{
 							"id":        motorID,
-							"position":  motor.Position,
+							"position":  motor.Position - motor.Zero,
 							"error":     motor.Error,
-							"isMoving":  isMoving, // 告知前端是否正在运动，方便 UI 展示
+							"isMoving":  false,
 							"isEnabled": motor.Enabled,
 						})
+
 					}
+
 				}
 			}
 
@@ -154,21 +177,112 @@ func (a *App) DisconnectDevice() {
 	}
 }
 
-// 统一控制接口：手动添加电机
-func (a *App) ManualAddMotor(motorConfig backend.MotorConfig) APIResponse {
-	if motorConfig.ID == 0 {
-		return APIResponse{"error", "ID cannot be 0", nil}
+func (a *App) DeleteMotor(id int) APIResponse {
+	//根据地址，查找对应电机实例
+	var motor *backend.MoonsMotor
+	for key := range a.motors {
+		if a.motors[key].Config.ID == id {
+			motor = a.motors[key]
+			break
+		}
 	}
-	motor := backend.NewMotor(motorConfig, &a.comm)
-	a.motors[fmt.Sprintf("MOTOR%d", motorConfig.ID)] = &motor
-	return APIResponse{"success", "Motor added", nil}
+	if motor == nil {
+		return APIResponse{"error", "Motor not found", nil}
+	}
+	delete(a.motors, fmt.Sprintf("MOTOR%d", motor.Config.ID))
+
+	// 同步保存到本地 JSON
+	a.SaveMotorsToLocal()
+
+	return APIResponse{"success", "Motor deleted", nil}
+}
+
+func (a *App) EditMotor(id int, motorConfig backend.MotorConfig) APIResponse {
+	fmt.Println("正在编辑电机", motorConfig)
+	//根据地址，查找对应电机实例
+	var motor *backend.MoonsMotor
+	var oldKey string
+	for key := range a.motors {
+		if a.motors[key].Config.ID == id {
+			motor = a.motors[key]
+			oldKey = key
+			break
+		}
+	}
+	if motor == nil {
+		return APIResponse{"error", "Motor not found", nil}
+	}
+
+	// 先更新配置中的ID（如果NewID有效）
+	if motorConfig.NewID != 0 && motorConfig.NewID != id {
+		//如果其他电机以及新ID已存在，返回错误
+		var existMotor *backend.MoonsMotor
+		for key := range a.motors {
+			if a.motors[key].Config.ID == motorConfig.NewID {
+				existMotor = a.motors[key]
+				break
+			}
+		}
+		if existMotor != nil {
+			fmt.Printf("电机 %d 已存在\n", motorConfig.NewID)
+			return APIResponse{"error", fmt.Sprintf("Motor ID %d already exists", motorConfig.NewID), nil}
+		}
+
+		if motorConfig.NewID > 31 || motorConfig.NewID < 1 {
+			return APIResponse{"error", fmt.Sprintf("Motor ID %d is out of range", motorConfig.NewID), nil}
+		}
+
+		err := motor.SetID(id, motorConfig.NewID)
+		if err != nil {
+			fmt.Printf("电机 %d 修改ID失败: %v\n", id, err)
+		} else {
+			fmt.Printf("电机 %d 修改ID成功: %d\n", id, motorConfig.NewID)
+			// 更新motorConfig中的ID为NewID，确保配置一致性
+			motorConfig.ID = motorConfig.NewID
+
+			if a.ctx != nil {
+				runtime.EventsEmit(a.ctx, "edit_ID", map[string]interface{}{
+					"oldID": id,
+					"newID": motorConfig.NewID,
+				})
+				fmt.Println("Wails 事件 edit_ID 已成功发出")
+			} else {
+				fmt.Println("❌ 警告: a.ctx 为 nil，无法发送 Wails 事件！")
+			}
+		}
+	}
+
+	speed, _ := motor.GetSpeed()
+
+	if motorConfig.Speed != speed {
+		motor.SetSpeed(float32(motorConfig.Speed))
+	}
+
+	motor.Config = motorConfig
+	delete(a.motors, oldKey)
+	a.motors[oldKey] = motor
+
+	// 同步保存到本地 JSON
+	a.SaveMotorsToLocal()
+	return APIResponse{"success", "Motor edited", nil}
 }
 
 // 统一控制接口：根据 ID 寻找电机并执行使能
 func (a *App) MotorEnable(id int, enable bool) APIResponse {
 
-	key := fmt.Sprintf("MOTOR%d", id)
-	motor := a.motors[key]
+	//根据地址，查找对应电机实例
+	var motor *backend.MoonsMotor
+	for key := range a.motors {
+		fmt.Println(a.motors[key].Config.ID)
+		if a.motors[key].Config.ID == id {
+			motor = a.motors[key]
+			break
+		}
+	}
+	if motor == nil {
+		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
+	}
+
 	ok := motor.Enable(enable)
 
 	if ok != nil {
@@ -182,8 +296,17 @@ func (a *App) MotorEnable(id int, enable bool) APIResponse {
 
 // 统一控制接口：根据 ID 停止
 func (a *App) MotorStop(id int) APIResponse {
-	key := fmt.Sprintf("MOTOR%d", id)
-	motor := a.motors[key]
+	//根据地址，查找对应电机实例
+	var motor *backend.MoonsMotor
+	for key := range a.motors {
+		if a.motors[key].Config.ID == id {
+			motor = a.motors[key]
+			break
+		}
+	}
+	if motor == nil {
+		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
+	}
 
 	err := motor.Stop()
 
@@ -196,8 +319,18 @@ func (a *App) MotorStop(id int) APIResponse {
 
 // 统一控制接口：根据 ID 相对运动
 func (a *App) MotorMoveRelative(id int, length float32) APIResponse {
-	key := fmt.Sprintf("MOTOR%d", id)
-	motor := a.motors[key]
+	//根据地址，查找对应电机实例
+	var motor *backend.MoonsMotor
+	for key := range a.motors {
+		if a.motors[key].Config.ID == id {
+			motor = a.motors[key]
+			break
+		}
+	}
+	if motor == nil {
+		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
+	}
+
 	err := motor.MoveRelative(length)
 
 	if err != nil {
@@ -209,8 +342,18 @@ func (a *App) MotorMoveRelative(id int, length float32) APIResponse {
 
 // 统一控制接口：根据 ID 将当前位置置为0
 func (a *App) ResetPosition(id int) APIResponse {
-	key := fmt.Sprintf("MOTOR%d", id)
-	motor := a.motors[key]
+	//根据地址，查找对应电机实例
+	var motor *backend.MoonsMotor
+	for key := range a.motors {
+		if a.motors[key].Config.ID == id {
+			motor = a.motors[key]
+			break
+		}
+	}
+	if motor == nil {
+		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
+	}
+
 	err := motor.SetHome()
 	if err != nil {
 		return APIResponse{"error", fmt.Sprintf("Motor %d reset position failed: %v", id, err), nil}
@@ -227,8 +370,6 @@ func (a *App) GetConfigPath() string {
 		return "config.json"
 	}
 	configDir := filepath.Join(homeDir, "Tang", "MOONS")
-	fmt.Printf("configDir: %s", configDir)
-
 	_ = os.MkdirAll(configDir, 0755)
 	return filepath.Join(configDir, "config.json")
 }
@@ -275,19 +416,20 @@ func (a *App) LoadLocalMotors() {
 // SaveMotorsToLocal 将 motors 全部保存为扁平化的 JSON 格式
 func (a *App) SaveMotorsToLocal() error {
 	configPath := a.GetConfigPath()
+	fmt.Println("配置文件路径:", configPath)
 
 	// 定义一个与你要求的 JSON 格式完全一致的临时结构体
 	type FlatMotorConfig struct {
-		ID          int    `json:"id"`
-		Name        string `json:"name"`
-		DIR         int    `json:"dir"`
-		Speed       int    `json:"speed"`
-		Resolution  int    `json:"resolution"`
-		Unit        string `json:"unit"`
-		CWName      string `json:"cwName"`
-		CCWName     string `json:"ccwName"`
-		Mode        string `json:"mode"`
-		Description string `json:"description"`
+		ID          int     `json:"id"`
+		Name        string  `json:"name"`
+		DIR         int     `json:"dir"`
+		Speed       float32 `json:"speed"`
+		Resolution  int     `json:"resolution"`
+		Unit        string  `json:"unit"`
+		CWName      string  `json:"cwName"`
+		CCWName     string  `json:"ccwName"`
+		Mode        string  `json:"mode"`
+		Description string  `json:"description"`
 	}
 
 	var saveList []FlatMotorConfig
@@ -296,7 +438,6 @@ func (a *App) SaveMotorsToLocal() error {
 		saveList = append(saveList, FlatMotorConfig{
 			ID:          m.Config.ID,
 			Name:        m.Config.Name,
-			DIR:         m.Config.DIR,
 			Speed:       m.Config.Speed,
 			Resolution:  m.Config.Resolution,
 			Unit:        m.Config.Unit,
@@ -319,15 +460,21 @@ func (a *App) SaveMotorsToLocal() error {
 func (a *App) SearchMotors() APIResponse {
 	// 鸣志 Modbus 地址通常从 1 开始
 	for i := 1; i <= 32; i++ {
+		// 计算进度百分比
+		progress := int((float32(i) / float32(32)) * 100)
+		// 发送进度事件到前端
+		runtime.EventsEmit(a.ctx, "search_progress", progress)
+
 		// 1. 创建一个临时电机实例用于测试通讯
 		// 默认配置，mode 设为 modbus
+		//name用时间命名：格式为motor_时间戳后5位
+		motorKey := fmt.Sprintf("MOTOR_%d", time.Now().Unix()%100000)
 		testConfig := backend.MotorConfig{
 			ID:         i,
-			Name:       fmt.Sprintf("MOTOR%d", i),
+			Name:       motorKey,
 			Unit:       "mm",
-			DIR:        1,
 			Resolution: 1000,
-			Mode:       "modbus", // 强制使用 modbus 模式扫描
+			Mode:       "scl", // 强制使用 scl 模式扫描
 		}
 
 		// 初始化临时对象
@@ -339,16 +486,25 @@ func (a *App) SearchMotors() APIResponse {
 
 		if err != nil {
 			// 如果读取失败（超时或CRC错误），说明该地址没有电机
-			fmt.Printf("扫描地址 %d: 无响应或通讯错误: %v\n", i, err)
+			// fmt.Printf("扫描地址 %d: 无响应或通讯错误: %v\n", i, err)
 			continue
 		}
 
 		// 3. 运行到这里说明电机在线
-		motorKey := fmt.Sprintf("MOTOR%d", i)
-		fmt.Printf("找到新设备：地址 %d, 当前位置: %d\n", i, pos)
+		// motorKey := fmt.Sprintf("MOTOR%d", i)
+		fmt.Printf("找到新设备：地址 %d, 当前位置: %f\n", i, pos)
 
 		// 4. 如果电机已在内存列表中，跳过添加，但可以尝试使能
-		if _, exists := a.motors[motorKey]; exists {
+
+		//根据地址，查找对应电机实例
+		var motor *backend.MoonsMotor
+		for key := range a.motors {
+			if a.motors[key].Config.ID == i {
+				motor = a.motors[key]
+				break
+			}
+		}
+		if motor != nil {
 			fmt.Printf("节点 %d 已在列表中，跳过重复添加\n", i)
 			a.MotorEnable(i, true)
 			continue
@@ -359,12 +515,11 @@ func (a *App) SearchMotors() APIResponse {
 			ID:          i,
 			Name:        motorKey,
 			Unit:        "mm",
-			DIR:         1,
 			Resolution:  20000,
 			Speed:       1,
 			CCWName:     "CCW",
 			CWName:      "CW",
-			Mode:        "modbus",
+			Mode:        "scl",
 			Description: "自动扫描发现",
 		}
 
@@ -380,7 +535,79 @@ func (a *App) SearchMotors() APIResponse {
 
 		// 9. 发现新设备后同步保存到本地 JSON
 		a.SaveMotorsToLocal()
+
 	}
 
+	// 搜索结束，发送 100% 信号
+	runtime.EventsEmit(a.ctx, "search_progress", 100)
+
 	return APIResponse{"success", "电机扫描完成", nil}
+}
+
+// 统一控制接口：手动添加电机
+func (a *App) ManualAddMotor() APIResponse {
+	// 查找一个未被占用的ID (1-31)
+	var TargetID int
+	usedIDs := make(map[int]bool)
+
+	// 收集已使用的ID
+	for key := range a.motors {
+		usedIDs[a.motors[key].Config.ID] = true
+	}
+
+	// 查找第一个未使用的ID
+	for i := 1; i <= 31; i++ {
+		if !usedIDs[i] {
+			TargetID = i
+			break
+		}
+	}
+
+	// 如果没有找到可用ID
+	if TargetID == 0 {
+		return APIResponse{"error", "No available motor ID (1-31)", nil}
+	}
+
+	// 生成电机名称：MOTOR_时间戳后5位
+	motorKey := fmt.Sprintf("MOTOR_%d", time.Now().Unix()%100000)
+
+	// 组装电机配置
+	motorDetail := backend.MotorConfig{
+		ID:          TargetID,
+		Name:        motorKey,
+		Unit:        "mm",
+		Resolution:  20000,
+		Speed:       1,
+		CCWName:     "CCW",
+		CWName:      "CW",
+		Mode:        "scl",
+		Description: "手动添加",
+	}
+
+	// 初始化后端电机实例并存入 Map
+	realMotor := backend.NewMotor(motorDetail, &a.comm)
+	a.motors[motorKey] = &realMotor
+
+	// 发送给前端通知增加卡片
+	runtime.EventsEmit(a.ctx, "find_motor", motorDetail)
+
+	// 同步保存到本地 JSON
+	a.SaveMotorsToLocal()
+
+	return APIResponse{"success", "Motor added", motorDetail}
+}
+
+func (a *App) APIUpdate() update.GitHubRelease {
+	//获取更新信息
+	release, err := a.updater.GetUpdateInfo()
+	if err != nil {
+		fmt.Printf("获取更新信息失败: %v\n", err)
+		return update.GitHubRelease{}
+	}
+	fmt.Printf("更新信息: %v\n", release)
+	return release
+}
+
+func (a *App) GetCachedRelease() update.GitHubRelease {
+	return a.updater.GetCachedRelease()
 }

@@ -89,7 +89,9 @@ func (s *SerialCommunicator) IsConnected() bool {
 
 // SendString 发送字符串（通常以 \n 结尾）并等待含 \n 的回复
 func (s *SerialCommunicator) SendString(data string) (string, error) {
-	resp, err := s.executeTransfer([]byte(data), false)
+	dataWithNewLine := data + "\r\n"
+
+	resp, err := s.executeTransfer([]byte(dataWithNewLine), false)
 	if err != nil {
 		return "", err
 	}
@@ -108,13 +110,14 @@ func (s *SerialCommunicator) readUntilDelimiter() ([]byte, error) {
 		}
 
 		n, err := s.portConn.Read(tmpBuf)
+
 		if err != nil {
 			return nil, err
 		}
 
 		if n > 0 {
 			fullFrame = append(fullFrame, tmpBuf[:n]...)
-			if bytes.Contains(tmpBuf[:n], []byte{'\n'}) {
+			if bytes.Contains(tmpBuf[:n], []byte{'\r'}) {
 				return fullFrame, nil
 			}
 		} else {
@@ -153,6 +156,7 @@ func (s *SerialCommunicator) readModbusFrame() ([]byte, error) {
 
 	for {
 		if time.Since(startTime) > s.Timeout {
+			fmt.Printf("串口 %s Modbus 读取超时\n", s.Port)
 			return nil, fmt.Errorf("modbus read timeout (%v)", s.Timeout)
 		}
 
@@ -193,7 +197,7 @@ func (s *SerialCommunicator) executeTransfer(data []byte, isModbus bool) ([]byte
 	}
 
 	// 设置底层物理读取超时，防止 Read 永远阻塞
-	s.portConn.SetReadTimeout(50 * time.Millisecond)
+	s.portConn.SetReadTimeout(100 * time.Millisecond)
 
 	var lastErr error
 	for i := 0; i <= s.MaxRetries; i++ {
