@@ -127,7 +127,90 @@ func (s *SerialCommunicator) readUntilDelimiter() ([]byte, error) {
 }
 
 // ----------------------------------------------------------------
-// 3. Modbus RTU 通讯逻辑 (Modbus Mode)
+// 3. 3E Bus 电机协议通讯逻辑 (3E Bus Mode)
+// ----------------------------------------------------------------
+
+// Send3EBus 发送 3E Bus 电机协议请求
+// data: 原始数据（不含校验字节）
+// expectedLen: 期望的回复长度（包含校验字节）
+// startByte: 帧头字节，用于帧同步
+func (s *SerialCommunicator) Send3EBus(data []byte, expectedLen int, startByte byte) ([]byte, error) {
+	// 添加校验字节
+	fullCmd := s.calculate3ECheckSum(data)
+
+	// 执行传输
+	return s.execute3EBusTransfer(fullCmd, expectedLen, startByte)
+}
+
+// Calculate3ECheckSum 计算 3E Bus 协议校验和（公开方法）
+func (s *SerialCommunicator) Calculate3ECheckSum(data []byte) []byte {
+	return s.calculate3ECheckSum(data)
+}
+
+// calculate3ECheckSum 计算 3E Bus 协议校验和
+func (s *SerialCommunicator) calculate3ECheckSum(data []byte) []byte {
+	var sum uint16 = 0
+	for _, b := range data {
+		sum += uint16(b)
+	}
+	return append(data, uint8(sum))
+}
+
+// Send3EBusRaw 发送已包含校验和的 3E Bus 数据
+// 用于需要手动计算校验和的场景（如分段发送）
+func (s *SerialCommunicator) Send3EBusRaw(data []byte, expectedLen int, startByte byte) ([]byte, error) {
+	return s.execute3EBusTransfer(data, expectedLen, startByte)
+}
+
+// execute3EBusTransfer 执行 3E Bus 协议传输
+func (s *SerialCommunicator) execute3EBusTransfer(data []byte, expectedLen int, startByte byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.isConnected {
+		return nil, fmt.Errorf("serial port not connected")
+	}
+
+	// 设置读取超时
+	s.portConn.SetReadTimeout(5 * time.Millisecond)
+
+	// 发送前清空缓冲区
+	s.portConn.ResetInputBuffer()
+
+	// 发送请求
+	if _, err := s.portConn.Write(data); err != nil {
+		return nil, err
+	}
+
+	// 循环读取，直到读够字节或超时
+	result := make([]byte, 0, expectedLen)
+	deadline := time.Now().Add(200 * time.Millisecond)
+
+	for time.Now().Before(deadline) && len(result) < expectedLen {
+		buf := make([]byte, expectedLen)
+		n, err := s.portConn.Read(buf)
+		if err != nil {
+			break
+		}
+		if n > 0 {
+			result = append(result, buf[:n]...)
+		}
+
+		// 寻找帧头：如果第一个字节不是预期的，丢弃前面的字节
+		for len(result) > 0 && result[0] != startByte {
+			result = result[1:]
+		}
+	}
+
+	if len(result) < expectedLen {
+		return nil, fmt.Errorf("3E Bus read timeout or insufficient length")
+	}
+
+	return result[:expectedLen], nil
+}
+
+// ----------------------------------------------------------------
+// 4. Modbus RTU 通讯逻辑 (Modbus Mode)
 // ----------------------------------------------------------------
 
 // SendModbus 发送标准 Modbus RTU 请求
@@ -156,7 +239,7 @@ func (s *SerialCommunicator) readModbusFrame() ([]byte, error) {
 
 	for {
 		if time.Since(startTime) > s.Timeout {
-			fmt.Printf("串口 %s Modbus 读取超时\n", s.Port)
+			// fmt.Printf("串口 %s Modbus 读取超时\n", s.Port)
 			return nil, fmt.Errorf("modbus read timeout (%v)", s.Timeout)
 		}
 
