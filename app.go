@@ -479,27 +479,30 @@ func (a *App) SearchMotors() APIResponse {
 			Name:       motorKey,
 			Unit:       "mm",
 			Resolution: 1000,
-			Mode:       "scl", // 强制使用 scl 模式扫描
+			Mode:       "scl", // 先使用 scl 模式扫描
 		}
 
 		// 初始化临时对象
 		testMotor := backend.NewMotor(testConfig, &a.comm)
-
-		// 2. 尝试读取电机位置
+		// 尝试读取电机位置
 		// 如果电机在线且协议匹配，GetPosition 会成功返回
 		pos, err := testMotor.GetPosition()
-
 		if err != nil {
-			// 如果读取失败（超时或CRC错误），说明该地址没有电机
-			// fmt.Printf("扫描地址 %d: 无响应或通讯错误: %v\n", i, err)
-			continue
+			// 如果读取失败（超时或CRC错误），切换为 modbus 模式
+			testConfig.Mode = "modbus"
+			testMotor.Config = testConfig
+			pos, err = testMotor.GetPosition()
+			if err != nil {
+				// 如果 modbus 模式也失败，说明该地址没有电机
+				fmt.Printf("扫描地址 %d: 无响应或通讯错误: %v\n", i, err)
+				continue
+			}
 		}
 
-		// 3. 运行到这里说明电机在线
-		// motorKey := fmt.Sprintf("MOTOR%d", i)
+		// 运行到这里说明电机在线
 		fmt.Printf("找到新设备：地址 %d, 当前位置: %f\n", i, pos)
 
-		// 4. 如果电机已在内存列表中，跳过添加，但可以尝试使能
+		// 如果电机已在内存列表中，跳过添加，但可以尝试使能
 
 		//根据地址，查找对应电机实例
 		var motor *backend.MoonsMotor
@@ -515,7 +518,7 @@ func (a *App) SearchMotors() APIResponse {
 			continue
 		}
 
-		// 5. 组装最终的电机配置
+		// 组装最终的电机配置
 		motorDetail := backend.MotorConfig{
 			ID:          i,
 			Name:        motorKey,
@@ -524,7 +527,7 @@ func (a *App) SearchMotors() APIResponse {
 			Speed:       1,
 			CCWName:     "CCW",
 			CWName:      "CW",
-			Mode:        "scl",
+			Mode:        testConfig.Mode,
 			Description: "自动扫描发现",
 		}
 
