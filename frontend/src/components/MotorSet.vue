@@ -52,9 +52,18 @@
 
         <div class="form-row">
           <div class="form-group">
+            <label>电机型号</label>
+            <select v-model="form.motorType">
+              <option value="STF05">STF05</option>
+              <option value="MDXplus">MDX Plus</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label>正向名称 (CW)</label>
             <input v-model="form.cwName" type="text" placeholder="如：增加" />
           </div>
+        </div>
+        <div class="form-row">
           <div class="form-group">
             <label>反向名称 (CCW)</label>
             <input v-model="form.ccwName" type="text" placeholder="如：减少" />
@@ -84,6 +93,7 @@ interface MotorItem {
   unit?: string;
   speed?: number | string;
   mode?: string;
+  motorType?: string;
   cwName?: string;
   ccwName?: string;
   resolution?: number | string;
@@ -105,6 +115,7 @@ const form = ref<MotorItem>({
   unit: 'mm',
   speed: 1,
   mode: 'modbus',
+  motorType: 'STF05',
   cwName: 'CW',
   ccwName: 'CCW',
   resolution: 1000,

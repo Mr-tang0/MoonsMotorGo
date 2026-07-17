@@ -160,11 +160,14 @@
                       </div>
                   </div>
                   <div class="modal-footer">
-                      <button class="btn btn-secondary" @click="showUpdateModal = false">
+                      <!-- <button class="btn btn-secondary" @click="showUpdateModal = false">
                           稍后更新
+                      </button> -->
+                      <button class="btn btn-primary" @click="handleUpdate('github')">
+                          更新(Github)
                       </button>
-                      <button class="btn btn-primary" @click="handleUpdate">
-                          立即更新
+                      <button class="btn btn-primary" @click="handleUpdate('accelerate')">
+                          更新(加速源)
                       </button>
                   </div>
               </div>
@@ -424,12 +427,20 @@ const updateInfo = ref({
 const showUpdateModal = ref(false);
 
 // 更新处理函数
-const handleUpdate = () => {
+const handleUpdate = (source: string) => {
+  if(source === 'github'){
     if (updateInfo.value.htmlUrl) {
         // window.open(updateInfo.value.htmlUrl, '_blank');
         BrowserOpenURL(updateInfo.value.htmlUrl) 
         showUpdateModal.value = false;
     }
+  }else if(source === 'accelerate'){
+    if (updateInfo.value.htmlUrl) {
+        const url = 'https://ghfast.top/https://' + updateInfo.value.htmlUrl.replace('https://', '')
+        BrowserOpenURL(url) 
+        showUpdateModal.value = false;
+    }
+  }
 };
 
 // 初始化
@@ -450,7 +461,7 @@ onMounted(async() => {
         cwName: motor.cwName,
         ccwName: motor.ccwName,
         mode: motor.mode,
-
+        motorType: motor.motorType,
 
         // position: motor.position,
         // enable: motor.enable,

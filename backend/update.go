@@ -16,8 +16,7 @@ import (
 	"time"
 )
 
-//此文件为获取更新信息的接口
-
+// 此文件为获取更新信息的接口
 type UpdateService struct {
 	cachedRelease *GitHubRelease
 }

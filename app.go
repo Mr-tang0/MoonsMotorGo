@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	protocol "github.com/Mr-tang0/PIMSGoMod/protocol"
+
 	update "MOONs/backend"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -19,7 +21,7 @@ import (
 // App struct
 type App struct {
 	ctx    context.Context
-	comm   backend.SerialCommunicator
+	comm   protocol.SerialCommunicator
 	motors map[string]*backend.MoonsMotor
 
 	updater *update.UpdateService
@@ -40,7 +42,7 @@ func (a *App) startup(ctx context.Context) {
 	// 初始化更新服务
 	a.updater = &update.UpdateService{}
 
-	a.comm = backend.SerialCommunicator{
+	a.comm = protocol.SerialCommunicator{
 		Port:       "COM0",
 		BaudRate:   9600,
 		Timeout:    100 * time.Millisecond,
@@ -258,12 +260,15 @@ func (a *App) EditMotor(id int, motorConfig backend.MotorConfig) APIResponse {
 	}
 
 	speed, _ := motor.GetSpeed()
+	fmt.Printf("电机 %d 当前速度: %d RPS\n", motorConfig.ID, speed)
 
 	if motorConfig.Speed != speed {
 		motor.SetSpeed(float32(motorConfig.Speed))
 	}
+	motor.SetMotorType(motorConfig.MotorType)
 
 	motor.Config = motorConfig
+
 	delete(a.motors, oldKey)
 	a.motors[oldKey] = motor
 
@@ -435,6 +440,7 @@ func (a *App) SaveMotorsToLocal() error {
 		CCWName     string  `json:"ccwName"`
 		Mode        string  `json:"mode"`
 		Description string  `json:"description"`
+		MotorType   string  `json:"motorType"`
 	}
 
 	var saveList []FlatMotorConfig
@@ -450,6 +456,7 @@ func (a *App) SaveMotorsToLocal() error {
 			CCWName:     m.Config.CCWName,
 			Mode:        m.Config.Mode,
 			Description: m.Config.Description,
+			MotorType:   m.Config.MotorType,
 		})
 	}
 
@@ -480,6 +487,7 @@ func (a *App) SearchMotors() APIResponse {
 			Unit:       "mm",
 			Resolution: 1000,
 			Mode:       "scl", // 先使用 scl 模式扫描
+			MotorType:  "STF05",
 		}
 
 		// 初始化临时对象
@@ -528,6 +536,7 @@ func (a *App) SearchMotors() APIResponse {
 			CCWName:     "CCW",
 			CWName:      "CW",
 			Mode:        testConfig.Mode,
+			MotorType:   "MDXplus",
 			Description: "自动扫描发现",
 		}
 
