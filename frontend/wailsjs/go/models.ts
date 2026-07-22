@@ -58,6 +58,7 @@ export namespace backend {
 	    cwName: string;
 	    ccwName: string;
 	    mode: string;
+	    motorType: string;
 	    newID: number;
 	
 	    static createFrom(source: any = {}) {
@@ -75,6 +76,7 @@ export namespace backend {
 	        this.cwName = source["cwName"];
 	        this.ccwName = source["ccwName"];
 	        this.mode = source["mode"];
+	        this.motorType = source["motorType"];
 	        this.newID = source["newID"];
 	    }
 	}

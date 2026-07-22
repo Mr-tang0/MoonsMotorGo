@@ -13,7 +13,7 @@
         <div class="form-row">
           <div class="form-group">
             <label>设备 ID</label>
-            <input v-model="form.newID" type="text" placeholder="1-31"/>
+            <input v-model="form.newID" type="text" placeholder="1-31" :disabled="form.mode === 'modbus'" :class="{ 'disabled-input': form.mode === 'modbus' }"/>
           </div>
           <div class="form-group">
             <label>设备名称</label>
@@ -54,16 +54,16 @@
           <div class="form-group">
             <label>电机型号</label>
             <select v-model="form.motorType">
-              <option value="STF05">STF05</option>
+              <option value="STF05">NORMAL</option>
               <option value="MDXplus">MDX Plus</option>
             </select>
           </div>
+        </div>
+        <div class="form-row">
           <div class="form-group">
             <label>正向名称 (CW)</label>
             <input v-model="form.cwName" type="text" placeholder="如：增加" />
           </div>
-        </div>
-        <div class="form-row">
           <div class="form-group">
             <label>反向名称 (CCW)</label>
             <input v-model="form.ccwName" type="text" placeholder="如：减少" />

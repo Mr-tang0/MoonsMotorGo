@@ -155,6 +155,7 @@ const startMove = async (dir: string) => {
     length = -length;
   } 
 
+  
   try {
     const result = await MotorMoveRelative(Number(props.motor.id), length);
     if (result.status === "success") {
