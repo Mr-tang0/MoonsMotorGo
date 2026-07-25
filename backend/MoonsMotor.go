@@ -184,12 +184,11 @@ func (m *MoonsMotor) SetMotorType(motorType string) error {
 }
 
 func (m *MoonsMotor) SetSpeed(speed float32) error {
+	fmt.Printf("电机 %d 设置速度: %f RPS\n", m.Config.ID, speed)
 	switch m.Config.Mode {
 	case "modbus":
-		fmt.Printf("当前电机型号为 %s, 速度地址为 %d, 低字节地址为 %d\n", m.Config.MotorType, m.Registers.RE_Speed, m.Registers.RE_Speed+1)
 		if m.Config.MotorType == "MDXplus" {
-			fmt.Printf("MDXplus 电机 %d 设置速度: %d RPS\n", m.Config.ID, speed)
-			speedRPS := int32(240 * speed * float32(m.Config.Resolution) / 20000)
+			speedRPS := int32(240 * speed * float32(m.Config.Resolution) / 1000)
 			// steps := int32(speed * float32(m.Config.Resolution))
 			slaveID := byte(m.Config.ID)
 			highPart := uint16(uint32(speedRPS) >> 16)
@@ -374,32 +373,33 @@ func (m *MoonsMotor) SetID(oldID, newID int) error {
 }
 
 // GetPosition 获取电机当前绝对位置 (手册对应 IP 指令)
-func (m *MoonsMotor) GetPosition() (float32, error) {
+func (m *MoonsMotor) GetPosition() (bool, error) {
 	switch m.Config.Mode {
 	case "modbus":
 		// 读取寄存器 40007-40008 (物理地址 0x0006)，长度为 2 个寄存器 (4字节)
 		resp, err := m.Comm.SendModbus(byte(m.Config.ID), FuncReadHoldingRegisters, m.Registers.RE_Position, 2)
 		if err != nil {
-			return 0, err
+			return false, err
 		}
 		// Modbus 响应格式: [Addr, Func, ByteCount, Data..., CRC_L, CRC_H]
 		// 数据在索引 3 开始 [cite: 276]
 		if len(resp) < 7 {
-			return 0, fmt.Errorf("invalid response length")
+			return false, fmt.Errorf("invalid response length")
 		}
 
 		position := int32(binary.BigEndian.Uint32(resp[3:7]))
 
 		// fmt.Printf("电机 %d IP响应: %d\n", m.Config.ID, position)
 
+		isMoving := m.Position != float32(position)/float32(m.Config.Resolution)
 		m.Position = float32(position) / float32(m.Config.Resolution) // 更新结构体状态
-		return m.Position, nil
+		return isMoving, nil
 
 	case "scl":
 		cmd := fmt.Sprintf("%sIP", MotorSCLAddress[m.Config.ID])
 		resp, err := m.Comm.SendString(cmd)
 		if err != nil {
-			return 0, err
+			return false, err
 		}
 		// fmt.Printf("电机 %d IP原始响应: %s\n", m.Config.ID, strings.TrimSpace(resp))
 
@@ -409,20 +409,22 @@ func (m *MoonsMotor) GetPosition() (float32, error) {
 		// matches[0] 是匹配到的整体（如 "=0"）
 		// matches[1] 是括号里捕获的数字部分（如 "0"）
 		if len(matches) < 2 {
-			return 0, fmt.Errorf("no number found after '=' in response: %s", resp)
+			return false, fmt.Errorf("no number found after '=' in response: %s", resp)
 		}
 
 		// 2. 转换成整型
 		position, err := strconv.Atoi(matches[1])
 		if err != nil {
-			return 0, fmt.Errorf("failed to convert %s to int: %v", matches[1], err)
+			return false, fmt.Errorf("failed to convert %s to int: %v", matches[1], err)
 		}
+
+		isMoving := m.Position != float32(position)/float32(m.Config.Resolution)
 
 		m.Position = float32(position) / float32(m.Config.Resolution) // 更新结构体状态
 
-		return m.Position, nil
+		return isMoving, nil
 	default:
-		return 0, fmt.Errorf("motor mode %s not supported", m.Config.Mode)
+		return false, fmt.Errorf("motor mode %s not supported", m.Config.Mode)
 	}
 }
 
@@ -514,18 +516,9 @@ func (m *MoonsMotor) GetMotionStatusModbus() (bool, error) {
 
 	// 解析状态字
 	statusCode := binary.BigEndian.Uint16(resp[3:5])
+	// fmt.Printf("电机 %d 状态字: 0x%04X\n", m.Config.ID, statusCode)
 
-	// 更新使能状态
-	// m.Config.Enable = (statusCode & (1 << 0)) != 0
-
-	// 获取是否正在运动 (Bit 4)
 	isMoving := (statusCode & (1 << 4)) != 0
-
-	// 获取是否到位 (Bit 3)
-	// inPosition := (statusCode & (1 << 3)) != 0
-
-	// fmt.Printf("电机 %d 状态: 运动中=%v, 已到位=%v\n", m.Config.ID, isMoving, inPosition)
-
 	return isMoving, nil
 }
 

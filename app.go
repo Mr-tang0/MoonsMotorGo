@@ -45,7 +45,7 @@ func (a *App) startup(ctx context.Context) {
 	a.comm = protocol.SerialCommunicator{
 		Port:       "COM0",
 		BaudRate:   9600,
-		Timeout:    100 * time.Millisecond,
+		Timeout:    50 * time.Millisecond,
 		MaxRetries: 1,
 	}
 
@@ -259,13 +259,9 @@ func (a *App) EditMotor(id int, motorConfig backend.MotorConfig) APIResponse {
 		}
 	}
 
-	speed, _ := motor.GetSpeed()
-	fmt.Printf("电机 %d 当前速度: %d RPS\n", motorConfig.ID, speed)
-
-	if motorConfig.Speed != speed {
-		motor.SetSpeed(float32(motorConfig.Speed))
-	}
 	motor.SetMotorType(motorConfig.MotorType)
+
+	motor.SetSpeed(float32(motorConfig.Speed))
 
 	motor.Config = motorConfig
 
@@ -410,8 +406,8 @@ func (a *App) LoadLocalMotors() {
 	fmt.Printf("从本地加载了 %d 个电机配置\n", len(motorConfigs))
 
 	for _, motor_detial := range motorConfigs {
-		if motor_detial.ID == 0 {
-			fmt.Println("跳过 ID 为 0 的电机")
+		if motor_detial.ID < 0 || motor_detial.ID > 32 {
+			fmt.Printf("跳过 ID 为 %d 的电机\n", motor_detial.ID)
 			continue
 		}
 		fmt.Println("正在加载电机", motor_detial.Name)
@@ -470,8 +466,8 @@ func (a *App) SaveMotorsToLocal() error {
 }
 
 func (a *App) SearchMotors() APIResponse {
-	// 鸣志 Modbus 地址通常从 1 开始
-	for i := 1; i <= 32; i++ {
+	// 鸣志 Modbus 地址从 0 开始
+	for i := 0; i <= 32; i++ {
 		// 计算进度百分比
 		progress := int((float32(i) / float32(32)) * 100)
 		// 发送进度事件到前端
@@ -485,7 +481,7 @@ func (a *App) SearchMotors() APIResponse {
 			ID:         i,
 			Name:       motorKey,
 			Unit:       "mm",
-			Resolution: 1000,
+			Resolution: 20000,
 			Mode:       "scl", // 先使用 scl 模式扫描
 			MotorType:  "STF05",
 		}
@@ -536,7 +532,7 @@ func (a *App) SearchMotors() APIResponse {
 			CCWName:     "CCW",
 			CWName:      "CW",
 			Mode:        testConfig.Mode,
-			MotorType:   "MDXplus",
+			MotorType:   "STF05",
 			Description: "自动扫描发现",
 		}
 

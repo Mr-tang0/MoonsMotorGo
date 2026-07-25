@@ -21,7 +21,7 @@ var (
 
 	RegisterMapMDX_Plus = RegisterMap{
 		RE_ErrorCode: 0x0000,
-		RE_Status:    0x0001,
+		RE_Status:    0x0003,
 		RE_Position:  0x0006,
 		RE_Speed:     0x015C,
 		RE_MoveRel:   0x015E,
