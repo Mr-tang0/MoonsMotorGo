@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	protocol "github.com/Mr-tang0/PIMSGoMod/protocol"
@@ -20,12 +21,14 @@ import (
 
 // App struct
 type App struct {
-	ctx    context.Context
-	comm   protocol.SerialCommunicator
-	motors map[string]*backend.MoonsMotor
+	ctx      context.Context
+	comm     protocol.SerialCommunicator
+	motorsMu sync.RWMutex
+	motors   map[string]*backend.MoonsMotor
 
 	updater *update.UpdateService
 
+	automationMu  sync.Mutex
 	cancelFunc    context.CancelFunc // 用于取消自动化任务的函数
 	isAutorunning bool               // 标记是否正在运行
 }
@@ -33,6 +36,41 @@ type App struct {
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{motors: make(map[string]*backend.MoonsMotor)}
+}
+
+func (a *App) findMotorByID(id int) (string, *backend.MoonsMotor) {
+	a.motorsMu.RLock()
+	defer a.motorsMu.RUnlock()
+
+	for key, motor := range a.motors {
+		if motor.Config.ID == id {
+			return key, motor
+		}
+	}
+	return "", nil
+}
+
+func (a *App) findMotorByName(name string) *backend.MoonsMotor {
+	a.motorsMu.RLock()
+	defer a.motorsMu.RUnlock()
+
+	for _, motor := range a.motors {
+		if motor.Config.Name == name {
+			return motor
+		}
+	}
+	return nil
+}
+
+func (a *App) snapshotMotors() []*backend.MoonsMotor {
+	a.motorsMu.RLock()
+	defer a.motorsMu.RUnlock()
+
+	motors := make([]*backend.MoonsMotor, 0, len(a.motors))
+	for _, motor := range a.motors {
+		motors = append(motors, motor)
+	}
+	return motors
 }
 
 // startup is called when the app starts. The context is saved
@@ -85,7 +123,7 @@ func (a *App) monitorLoop() {
 			// 是否到达了 1s 一次的全局扫描周期
 			isFullScanCycle := (cycleCounter >= 10)
 
-			for _, motor := range a.motors {
+			for _, motor := range a.snapshotMotors() {
 
 				motorID := motor.Config.ID
 
@@ -185,52 +223,31 @@ func (a *App) DisconnectDevice() {
 }
 
 func (a *App) DeleteMotor(id int) APIResponse {
-	//根据地址，查找对应电机实例
-	var motor *backend.MoonsMotor
-	for key := range a.motors {
-		if a.motors[key].Config.ID == id {
-			motor = a.motors[key]
-			break
-		}
-	}
+	key, motor := a.findMotorByID(id)
 	if motor == nil {
 		return APIResponse{"error", "Motor not found", nil}
 	}
-	delete(a.motors, fmt.Sprintf("MOTOR%d", motor.Config.ID))
 
-	// 同步保存到本地 JSON
-	a.SaveMotorsToLocal()
+	a.motorsMu.Lock()
+	delete(a.motors, key)
+	a.motorsMu.Unlock()
+
+	if err := a.SaveMotorsToLocal(); err != nil {
+		return APIResponse{"error", fmt.Sprintf("Motor deleted, but failed to save configuration: %v", err), nil}
+	}
 
 	return APIResponse{"success", "Motor deleted", nil}
 }
 
 func (a *App) EditMotor(id int, motorConfig backend.MotorConfig) APIResponse {
 	fmt.Println("正在编辑电机", motorConfig)
-	//根据地址，查找对应电机实例
-	var motor *backend.MoonsMotor
-	var oldKey string
-	for key := range a.motors {
-		if a.motors[key].Config.ID == id {
-			motor = a.motors[key]
-			oldKey = key
-			break
-		}
-	}
+	oldKey, motor := a.findMotorByID(id)
 	if motor == nil {
 		return APIResponse{"error", "Motor not found", nil}
 	}
 
-	// 先更新配置中的ID（如果NewID有效）
 	if motorConfig.NewID != 0 && motorConfig.NewID != id {
-		//如果其他电机以及新ID已存在，返回错误
-		var existMotor *backend.MoonsMotor
-		for key := range a.motors {
-			if a.motors[key].Config.ID == motorConfig.NewID {
-				existMotor = a.motors[key]
-				break
-			}
-		}
-		if existMotor != nil {
+		if _, existMotor := a.findMotorByID(motorConfig.NewID); existMotor != nil {
 			fmt.Printf("电机 %d 已存在\n", motorConfig.NewID)
 			return APIResponse{"error", fmt.Sprintf("Motor ID %d already exists", motorConfig.NewID), nil}
 		}
@@ -239,36 +256,34 @@ func (a *App) EditMotor(id int, motorConfig backend.MotorConfig) APIResponse {
 			return APIResponse{"error", fmt.Sprintf("Motor ID %d is out of range", motorConfig.NewID), nil}
 		}
 
-		err := motor.SetID(id, motorConfig.NewID)
-		if err != nil {
+		if err := motor.SetID(id, motorConfig.NewID); err != nil {
 			fmt.Printf("电机 %d 修改ID失败: %v\n", id, err)
-		} else {
-			fmt.Printf("电机 %d 修改ID成功: %d\n", id, motorConfig.NewID)
-			// 更新motorConfig中的ID为NewID，确保配置一致性
-			motorConfig.ID = motorConfig.NewID
+			return APIResponse{"error", fmt.Sprintf("Motor ID update failed: %v", err), nil}
+		}
 
-			if a.ctx != nil {
-				runtime.EventsEmit(a.ctx, "edit_ID", map[string]interface{}{
-					"oldID": id,
-					"newID": motorConfig.NewID,
-				})
-				fmt.Println("Wails 事件 edit_ID 已成功发出")
-			} else {
-				fmt.Println("❌ 警告: a.ctx 为 nil，无法发送 Wails 事件！")
-			}
+		fmt.Printf("电机 %d 修改ID成功: %d\n", id, motorConfig.NewID)
+		motorConfig.ID = motorConfig.NewID
+
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "edit_ID", map[string]interface{}{
+				"oldID": id,
+				"newID": motorConfig.NewID,
+			})
+			fmt.Println("Wails 事件 edit_ID 已成功发出")
+		} else {
+			fmt.Println("❌ 警告: a.ctx 为 nil，无法发送 Wails 事件！")
 		}
 	}
 
 	motor.SetMotorType(motorConfig.MotorType)
-
 	motor.SetSpeed(float32(motorConfig.Speed))
-
 	motor.Config = motorConfig
 
+	a.motorsMu.Lock()
 	delete(a.motors, oldKey)
 	a.motors[oldKey] = motor
+	a.motorsMu.Unlock()
 
-	// 同步保存到本地 JSON
 	a.SaveMotorsToLocal()
 	return APIResponse{"success", "Motor edited", nil}
 }
@@ -276,15 +291,7 @@ func (a *App) EditMotor(id int, motorConfig backend.MotorConfig) APIResponse {
 // 统一控制接口：根据 ID 寻找电机并执行使能
 func (a *App) MotorEnable(id int, enable bool) APIResponse {
 
-	//根据地址，查找对应电机实例
-	var motor *backend.MoonsMotor
-	for key := range a.motors {
-		fmt.Println(a.motors[key].Config.ID)
-		if a.motors[key].Config.ID == id {
-			motor = a.motors[key]
-			break
-		}
-	}
+	_, motor := a.findMotorByID(id)
 	if motor == nil {
 		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
 	}
@@ -302,14 +309,7 @@ func (a *App) MotorEnable(id int, enable bool) APIResponse {
 
 // 统一控制接口：根据 ID 停止
 func (a *App) MotorStop(id int) APIResponse {
-	//根据地址，查找对应电机实例
-	var motor *backend.MoonsMotor
-	for key := range a.motors {
-		if a.motors[key].Config.ID == id {
-			motor = a.motors[key]
-			break
-		}
-	}
+	_, motor := a.findMotorByID(id)
 	if motor == nil {
 		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
 	}
@@ -325,14 +325,7 @@ func (a *App) MotorStop(id int) APIResponse {
 
 // 统一控制接口：根据 ID 相对运动
 func (a *App) MotorMoveRelative(id int, length float32) APIResponse {
-	//根据地址，查找对应电机实例
-	var motor *backend.MoonsMotor
-	for key := range a.motors {
-		if a.motors[key].Config.ID == id {
-			motor = a.motors[key]
-			break
-		}
-	}
+	_, motor := a.findMotorByID(id)
 	if motor == nil {
 		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
 	}
@@ -348,14 +341,7 @@ func (a *App) MotorMoveRelative(id int, length float32) APIResponse {
 
 // 统一控制接口：根据 ID 将当前位置置为0
 func (a *App) ResetPosition(id int) APIResponse {
-	//根据地址，查找对应电机实例
-	var motor *backend.MoonsMotor
-	for key := range a.motors {
-		if a.motors[key].Config.ID == id {
-			motor = a.motors[key]
-			break
-		}
-	}
+	_, motor := a.findMotorByID(id)
 	if motor == nil {
 		return APIResponse{"error", fmt.Sprintf("Motor %d not found", id), nil}
 	}
@@ -413,7 +399,9 @@ func (a *App) LoadLocalMotors() {
 		fmt.Println("正在加载电机", motor_detial.Name)
 		motor := backend.NewMotor(motor_detial, &a.comm)
 
+		a.motorsMu.Lock()
 		a.motors[fmt.Sprintf("MOTOR%d", motor_detial.ID)] = &motor
+		a.motorsMu.Unlock()
 
 		runtime.EventsEmit(a.ctx, "find_motor", motor_detial)
 	}
@@ -441,7 +429,7 @@ func (a *App) SaveMotorsToLocal() error {
 
 	var saveList []FlatMotorConfig
 
-	for _, m := range a.motors {
+	for _, m := range a.snapshotMotors() {
 		saveList = append(saveList, FlatMotorConfig{
 			ID:          m.Config.ID,
 			Name:        m.Config.Name,
@@ -504,18 +492,10 @@ func (a *App) SearchMotors() APIResponse {
 		}
 
 		// 运行到这里说明电机在线
-		fmt.Printf("找到新设备：地址 %d, 当前位置: %f\n", i, pos)
+		fmt.Printf("找到新设备：地址 %d, 位置是否变化: %t\n", i, pos)
 
 		// 如果电机已在内存列表中，跳过添加，但可以尝试使能
-
-		//根据地址，查找对应电机实例
-		var motor *backend.MoonsMotor
-		for key := range a.motors {
-			if a.motors[key].Config.ID == i {
-				motor = a.motors[key]
-				break
-			}
-		}
+		_, motor := a.findMotorByID(i)
 		if motor != nil {
 			fmt.Printf("节点 %d 已在列表中，跳过重复添加\n", i)
 			a.MotorEnable(i, true)
@@ -538,7 +518,9 @@ func (a *App) SearchMotors() APIResponse {
 
 		// 6. 初始化正式的后端电机实例并存入 Map (注意这里存的是指针)
 		realMotor := backend.NewMotor(motorDetail, &a.comm)
+		a.motorsMu.Lock()
 		a.motors[motorKey] = &realMotor
+		a.motorsMu.Unlock()
 
 		// 7. 发送给前端通知增加卡片
 		runtime.EventsEmit(a.ctx, "find_motor", motorDetail)
@@ -564,8 +546,8 @@ func (a *App) ManualAddMotor() APIResponse {
 	usedIDs := make(map[int]bool)
 
 	// 收集已使用的ID
-	for key := range a.motors {
-		usedIDs[a.motors[key].Config.ID] = true
+	for _, motor := range a.snapshotMotors() {
+		usedIDs[motor.Config.ID] = true
 	}
 
 	// 查找第一个未使用的ID
@@ -599,7 +581,9 @@ func (a *App) ManualAddMotor() APIResponse {
 
 	// 初始化后端电机实例并存入 Map
 	realMotor := backend.NewMotor(motorDetail, &a.comm)
+	a.motorsMu.Lock()
 	a.motors[motorKey] = &realMotor
+	a.motorsMu.Unlock()
 
 	// 发送给前端通知增加卡片
 	runtime.EventsEmit(a.ctx, "find_motor", motorDetail)
@@ -627,31 +611,41 @@ func (a *App) GetCachedRelease() update.GitHubRelease {
 
 // StartAutomation 前端调用的接口
 func (a *App) StartAutomation(automationScript string) bool {
-	if automationScript == "" || a.isAutorunning {
+	if automationScript == "" {
 		return false
 	}
 
-	// 创建一个可以取消的 Context
-	var runCtx context.Context
-	runCtx, a.cancelFunc = context.WithCancel(context.Background())
+	a.automationMu.Lock()
+	if a.isAutorunning {
+		a.automationMu.Unlock()
+		return false
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	a.cancelFunc = cancel
 	a.isAutorunning = true
+	a.automationMu.Unlock()
 
 	// 必须在独立的 goroutine 中运行，防止阻塞 Wails 主线程导致前端卡死
 	go func() {
-		defer func() {
-			a.isAutorunning = false
-		}()
-
 		fmt.Println("====== 自动化脚本开始执行 ======")
 		lines := preprocessScript(automationScript)
 
-		// 执行解释器
 		err := a.executeScript(runCtx, lines)
+
+		a.automationMu.Lock()
+		a.isAutorunning = false
+		a.cancelFunc = nil
+		a.automationMu.Unlock()
+
 		if err != nil {
-			fmt.Printf("脚本执行中断或出错: %v\n", err)
-		} else {
-			fmt.Println("====== 自动化脚本圆满完成 ======")
+			if err != context.Canceled {
+				fmt.Printf("脚本执行中断或出错: %v\n", err)
+			}
+			return
 		}
+
+		fmt.Println("====== 自动化脚本圆满完成 ======")
+		runtime.EventsEmit(a.ctx, "auto_complete")
 	}()
 
 	return true
@@ -659,8 +653,12 @@ func (a *App) StartAutomation(automationScript string) bool {
 
 // StopAutomation 前端点击“停止”时调用的接口
 func (a *App) StopAutomation() {
-	if a.cancelFunc != nil {
-		a.cancelFunc() // 触发 Context 取消信号
+	a.automationMu.Lock()
+	cancel := a.cancelFunc
+	a.automationMu.Unlock()
+
+	if cancel != nil {
+		cancel() // 触发 Context 取消信号
 		fmt.Println("收到用户停止指令，正在终止自动化...")
 	}
 }
@@ -757,10 +755,14 @@ func (a *App) executeScript(ctx context.Context, lines []string) error {
 
 			action := strings.ToUpper(cmdParts[0]) // CW 或 CCW
 			valStr := cmdParts[1]
-			value, _ := strconv.ParseFloat(valStr, 64)
+			value, err := strconv.ParseFloat(valStr, 64)
+			if err != nil {
+				runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行参数解析失败: %s", pc+1, valStr))
+				return fmt.Errorf("第 %d 行参数解析失败: %s", pc+1, valStr)
+			}
 
 			// 调用底层的通用硬件驱动控制函数
-			err := a.AutoMoveMotor(ctx, motorID, action, value)
+			err = a.AutoMoveMotor(ctx, motorID, action, value)
 			if err != nil {
 				runtime.EventsEmit(a.ctx, "auto_error", fmt.Sprintf("第 %d 行执行电机动作失败: %v", pc+1, err))
 				return fmt.Errorf("执行电机动作失败: %v", err)
@@ -797,39 +799,23 @@ func findMatchingEnd(lines []string, start int) int {
 // 模拟具体的电机物理控制函数
 func (a *App) AutoMoveMotor(ctx context.Context, motorID string, action string, value float64) error {
 	fmt.Printf("[硬件动作] 寻找到轴: %s -> 执行动作: %s -> 参数: %f\n", motorID, action, value)
-	var motor *backend.MoonsMotor
-	for key := range a.motors {
-		if a.motors[key].Config.Name == motorID {
-			motor = a.motors[key]
-			break
-		}
-	}
+	motor := a.findMotorByName(motorID)
 	if motor == nil {
 		fmt.Println("未找到电机:", motorID)
-
 		return fmt.Errorf("未找到电机: %s", motorID)
 	}
 
 	switch action {
 	case "CW":
-		motor.MoveRelative(float32(value))
-		return nil
+		return motor.MoveRelative(float32(value))
 	case "CCW":
-		motor.MoveRelative(-float32(value))
-		return nil
+		return motor.MoveRelative(-float32(value))
 	case "STOP":
-		motor.Stop()
-		return nil
+		return motor.Stop()
 	case "VE":
-		motor.SetSpeed(float32(value))
-		return nil
+		return motor.SetSpeed(float32(value))
 	case "EN":
-		if value == 1 {
-			motor.Enable(true)
-		} else {
-			motor.Enable(false)
-		}
-		return nil
+		return motor.Enable(value == 1)
 	default:
 		return fmt.Errorf("未知的动作: %s", action)
 	}

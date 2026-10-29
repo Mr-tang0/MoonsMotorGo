@@ -357,8 +357,7 @@ func (m *MoonsMotor) GetSpeed() (float32, error) {
 func (m *MoonsMotor) SetID(oldID, newID int) error {
 	switch m.Config.Mode {
 	case "modbus":
-
-		return nil
+		return fmt.Errorf("setting motor ID is not supported in modbus mode")
 	case "scl":
 		cmd := fmt.Sprintf("%sDA%s", MotorSCLAddress[oldID], MotorSCLAddress[newID])
 		resp, err := m.Comm.SendString(cmd)

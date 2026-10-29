@@ -70,7 +70,7 @@
     <main class="content-area">
       <header class="content-header">
         <div class="search-bar">
-          <input type="text" v-model="searchQuery" placeholder="搜索位移台 ID..." />
+          <input type="text" v-model="searchQuery" placeholder="搜索电机名称..." @keyup.enter="handleSearch" />
           <button @click="handleSearch">搜索</button>
         </div>
         <div class="stats">
@@ -89,7 +89,7 @@
           ghost-class="ghost-card"
         >
           <template #item="{ element, index }">
-            <div class="grid-item">
+            <div v-show="matchesMotorName(element)" class="grid-item">
               <Motor 
                 :motor="element"
                 @remove="removeMotor(index)"
@@ -227,6 +227,7 @@ const selectedPort = ref('');
 const selectedBaud = ref('9600');
 const isConnected = ref(false);
 const searchQuery = ref('');
+const appliedSearchQuery = ref('');
 const showAutomation = ref(false);
 const automationProgress = ref(false);
 const automationScript = ref('');
@@ -318,7 +319,12 @@ const searchMotors = async () => {
   searchProgress.value = 0;
   
   try {
-    await SearchMotors();
+    const APIResponse = await SearchMotors();
+    if (APIResponse.status !== "success") {
+      notify("搜索设备失败：" + (APIResponse.message || "请检查设备连接"), 'error');
+    }
+  } catch (err) {
+    notify("搜索设备失败：" + err, 'error');
   } finally {
     setTimeout(() => {
       isSearching.value = false;
@@ -338,9 +344,14 @@ const runAutomation = async () => {
     }
 
     try {
-      notify("自动化脚本开始执行", 'info');
       automationProgress.value = true;
-      await StartAutomation(automationScript.value);
+      const started = await StartAutomation(automationScript.value);
+      if (started) {
+        notify("自动化脚本开始执行", 'info');
+      } else {
+        automationProgress.value = false;
+        notify("自动化脚本启动失败", 'error');
+      }
     } catch (error) {
       automationProgress.value=false;
       notify("自动化脚本执行失败", 'error');
@@ -384,38 +395,47 @@ const SaveScriptFile = async () => {
   }
 }
 
-// FOR 10
-// Z: CW 1
-// DELAY 1000
-// Z: CCW 1
-// DELAY 1000
-// END
-
-
-
 
 
 // 设备管理逻辑
 const addMotor = async () => {
-  const result = await ManualAddMotor();
-  if (result.status === "success") {
-    notify("轴(新位移台)添加成功", 'success');
-  }else {
-    notify("轴(新位移台)添加失败：" + (result.message || "请检查设备连接"), 'error');
+  try {
+    const result = await ManualAddMotor();
+    if (result.status === "success") {
+      notify("轴(新位移台)添加成功", 'success');
+    }else {
+      notify("轴(新位移台)添加失败：" + (result.message || "请检查设备连接"), 'error');
+    }
+  } catch (err) {
+    notify("轴(新位移台)添加失败：" + err, 'error');
   }
 };
 
 
 // 移除逻辑
 const removeMotor = async (index: number) => {
-  await DeleteMotor(Number(motors.value[index].id));
-  motors.value.splice(index, 1);
-  notify("轴(" + motors.value[index].name + ")已移除", 'success');
+  const motor = motors.value[index];
+  try {
+    const result = await DeleteMotor(Number(motor.id));
+    if (result.status === "success") {
+      motors.value.splice(index, 1);
+      notify("轴(" + motor.name + ")已移除", 'success');
+    } else {
+      notify("轴(" + motor.name + ")移除失败：" + (result.message || "请检查设备连接"), 'error');
+    }
+  } catch (err) {
+    notify("轴(" + motor.name + ")移除失败：" + err, 'error');
+  }
 };
 
 // 搜索逻辑
 const handleSearch = () => {
-  console.log("执行搜索:", searchQuery.value);
+  appliedSearchQuery.value = searchQuery.value.trim().toLocaleLowerCase();
+};
+
+const matchesMotorName = (motor: MotorItem) => {
+  if (!appliedSearchQuery.value) return true;
+  return (motor.name ?? '').toLocaleLowerCase().includes(appliedSearchQuery.value);
 };
 
 
@@ -527,6 +547,11 @@ onMounted(async() => {
       automationProgress.value = false;
   });
 
+  EventsOn("auto_complete", () => {
+      automationProgress.value = false;
+      notify("自动化脚本执行完成", 'success');
+  });
+
   await LoadLocalMotors();
 
 
@@ -555,6 +580,11 @@ onUnmounted(async() => {
     notify("已断开连接", 'success');
   }
   EventsOff("find_motor");
+  EventsOff("motor_status_update");
+  EventsOff("edit_ID");
+  EventsOff("search_progress");
+  EventsOff("auto_error");
+  EventsOff("auto_complete");
 });
 
 
